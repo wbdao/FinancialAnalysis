@@ -1,0 +1,7 @@
+# Customer data must never be committed
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+~$*
+.claude/

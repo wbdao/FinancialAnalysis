@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>موقف الفواتير</title>
+  <link rel="stylesheet" href="styles.css?v=2">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>موقف الفواتير</h1>
+      <p id="stamp" class="muted">الائتمان والضمان والمتأخرات</p>
+    </div>
+    <nav class="tabs" aria-label="الشاشات">
+      <button type="button" data-view="invoices" aria-current="page">الفواتير</button>
+      <button type="button" data-view="check">فحص فاتورة جديدة</button>
+      <button type="button" data-view="requests">الطلبات والاعتمادات</button>
+      <button type="button" data-view="settings">الإعدادات</button>
+    </nav>
+    <button type="button" id="reload" class="ghost">تحديث البيانات</button>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main>
+    <section id="view-invoices" hidden>
+      <div id="kpis" class="kpis"></div>
+      <div id="aging" class="aging" role="group" aria-label="أعمار الفواتير المفتوحة"></div>
+      <div class="filters">
+        <label>بحث
+          <input id="q" type="search" placeholder="رقم الفاتورة أو العميل أو الكود">
+        </label>
+        <label>الموقف
+          <select id="verdict">
+            <option value="open">كل المفتوحة</option>
+            <option value="stop">حرجة</option>
+            <option value="warn">تحتاج متابعة</option>
+            <option value="ok">منتظمة</option>
+            <option value="paid">مسددة</option>
+            <option value="all">كل الفواتير</option>
+          </select>
+        </label>
+        <label>المندوب
+          <select id="rep"></select>
+        </label>
+        <button type="button" id="export" class="ghost">تصدير CSV</button>
+      </div>
+      <p id="count" class="muted" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>الفاتورة</th><th>العميل</th><th>التاريخ</th><th class="n">القيمة</th><th class="n">المتبقي</th>
+              <th>الاستحقاق</th><th>الائتمان</th><th>الضمان</th><th>المتأخرات</th><th>الموقف</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <button type="button" id="more" class="ghost more" hidden>عرض المزيد</button>
+    </section>
+
+    <section id="view-check" hidden>
+      <form id="checkForm" class="panel form">
+        <h2>هل يمكن إصدار الفاتورة؟</h2>
+        <label>العميل
+          <input id="checkCustomer" list="customerList" placeholder="اكتب الاسم أو الكود" autocomplete="off" required>
+          <datalist id="customerList"></datalist>
+        </label>
+        <label>قيمة الفاتورة
+          <input id="checkAmount" type="number" min="0.01" step="any" inputmode="decimal" dir="ltr" required>
+        </label>
+        <button type="submit">افحص</button>
+      </form>
+      <div id="checkResult"></div>
+    </section>
+
+    <section id="view-requests" hidden>
+      <div class="filters">
+        <label>موقف الاعتماد
+          <select id="requestStatus">
+            <option value="قيد الاعتماد">قيد الاعتماد</option>
+            <option value="معتمد">معتمد</option>
+            <option value="مرفوض">مرفوض</option>
+            <option value="لا يحتاج اعتماد">لا يحتاج اعتماد</option>
+            <option value="">الكل</option>
+          </select>
+        </label>
+        <button type="button" id="requestsReload" class="ghost">تحديث الطلبات</button>
+      </div>
+      <p id="requestsCount" class="muted" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>الطلب</th><th>العميل</th><th class="n">القيمة</th><th>الفحص</th><th>مقدم الطلب</th>
+              <th>الاعتماد</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="requestRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-settings" hidden>
+      <form id="settingsForm" class="panel form">
+        <h2>تسجيل الطلبات والاعتماد</h2>
+        <label>رابط Apps Script
+          <input id="scriptUrl" type="url" dir="ltr">
+        </label>
+        <label>مفتاح الدخول
+          <input id="accessKey" type="password" dir="ltr" autocomplete="off">
+        </label>
+        <label>اسمك
+          <input id="userName" autocomplete="name">
+        </label>
+        <p class="muted">المفتاح يحدد صلاحيتك: تسجيل الطلبات أو الاعتماد، ويُحفظ في هذا المتصفح فقط. الاسم يُسجل في الشيت كما تكتبه.</p>
+        <h2>مصدر البيانات</h2>
+        <label>رابط Google Sheet
+          <input id="sheetUrl" type="url" dir="ltr" placeholder="https://docs.google.com/spreadsheets/d/…/edit">
+        </label>
+        <p class="muted">لازم يكون الملف محفوظ كـ Google Sheet وليس xlsx، ومشاركًا بصلاحية «أي شخص لديه الرابط — عارض». الرابط يُحفظ في هذا المتصفح فقط ولا يُرفع إلى GitHub.</p>
+        <label>شيت قاعدة العملاء
+          <input id="baseTab">
+        </label>
+        <label>شيت حركات العملاء
+          <input id="txTab">
+        </label>
+        <h2>قواعد التحليل</h2>
+        <label>فاتورة جديدة تتجاوز حد الائتمان
+          <select id="overLimit">
+            <option value="stop">موقوفة</option>
+            <option value="warn">تحتاج موافقة</option>
+          </select>
+        </label>
+        <label>المتأخرات تصبح حرجة بعد (يوم)
+          <input id="stopDays" type="number" min="0" step="1" dir="ltr" required>
+        </label>
+        <label>تجاهل المتأخرات الأقل من (مبلغ)
+          <input id="tolerance" type="number" min="0" step="any" dir="ltr" required>
+        </label>
+        <div class="actions">
+          <button type="submit">حفظ وتحميل</button>
+          <button type="button" id="demo" class="ghost">تجربة ببيانات نموذجية</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="detail" aria-labelledby="detailTitle">
+    <div id="detailBody"></div>
+    <form method="dialog"><button class="ghost">إغلاق</button></form>
+  </dialog>
+
+  <dialog id="decision" aria-labelledby="decisionTitle">
+    <h2 id="decisionTitle"></h2>
+    <p id="decisionInfo" class="muted"></p>
+    <label>ملاحظات الاعتماد
+      <textarea id="decisionNote" rows="3"></textarea>
+    </label>
+    <p id="decisionError" class="form-error" role="alert" hidden></p>
+    <div class="actions">
+      <button type="button" id="approve">اعتماد</button>
+      <button type="button" id="reject" class="danger">رفض</button>
+      <button type="button" id="decisionClose" class="ghost">إلغاء</button>
+    </div>
+  </dialog>
+
+  <script src="engine.js?v=2"></script>
+  <script src="demo.js?v=2"></script>
+  <script src="app.js?v=2"></script>
+</body>
+</html>
