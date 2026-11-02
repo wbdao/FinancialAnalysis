@@ -25,6 +25,17 @@ const inv = (r, number) => r.invoices.find((i) => i.number === number);
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
+test('customer base fields used by the requests sheet are read', () => {
+  const r = Engine.analyze(
+    [['Account', 'Name', 'Credit limit', 'ID number', 'Warehouse Group', 'Customer group'], ['A', 'عميل', 1000, 'CH-7', 65, 'Wsagent-H']],
+    txSheet([]),
+  );
+  const c = cust(r, 'A');
+  assert.strictEqual(c.idNumber, 'CH-7');
+  assert.strictEqual(c.warehouse, '65');
+  assert.strictEqual(c.group, 'Wsagent-H');
+});
+
 test('FIFO settles the oldest invoice first and leaves the rest open', () => {
   const r = Engine.analyze(
     baseSheet([['A', 'عميل', '', 100000, 100000, 0, 'Net30', 'م']]),

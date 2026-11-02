@@ -17,6 +17,7 @@
       ['DEMO-5', 'عميل تجريبي متعثر', 'الفرع', 'Privt-Reta', 80000, 10000, 95000, 'Net30', 'مندوب تجريبي ب'],
       ['DEMO-6', 'عميل تجريبي موقوف', 'الرئيسي', 'Stoped Cus', 0, 0, 0, 'Stop', 'مندوب تجريبي أ'],
     ];
+    base.forEach((row, i) => row.push(i ? `DEMO-ID-${i}` : 'ID number'));
     const sale = (acc, days, amount, inv) => [acc, 'Sales order', ago(days), amount, `SO-${inv}`, inv, ''];
     const pay = (acc, days, amount) => [acc, 'Payment', ago(days), -amount, `PAY-${days}`, '', 'تحصيل'];
     const tx = [

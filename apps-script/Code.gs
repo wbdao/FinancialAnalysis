@@ -13,7 +13,7 @@ const APPROVE_KEY = 'غيّر-هذا-المفتاح';   // كل ما سبق + ا
 // اتركه فارغًا إذا كان السكربت من داخل الشيت (Extensions > Apps Script)، وإلا ضع معرّف الشيت
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-02-a1';
+const BUILD = '2026-11-02-a2';
 const UNSET_KEY = 'غيّر-هذا-المفتاح';
 const SHEET_NAME = 'طلبات الفواتير';
 const ID_PREFIX = 'REQ';
@@ -28,6 +28,9 @@ const COLUMNS = {
   account: 'كود العميل',
   customer: 'اسم العميل',
   rep: 'المندوب',
+  idNumber: 'ID number',
+  warehouse: 'Warehouse Group',
+  group: 'Customer group',
   amount: 'قيمة الفاتورة',
   balance: 'الرصيد قبل الفاتورة',
   balanceAfter: 'الرصيد بعد الفاتورة',

@@ -23,7 +23,7 @@
   const BASE_COLS = {
     account: ['Account'], name: ['Name'], warehouse: ['Warehouse Group'], group: ['Customer group'],
     guarantee: ['Eligible credit limit', 'الضمان'], creditLimit: ['Credit limit'], baseBalance: ['Balance'],
-    terms: ['Payment schedule'], rep: ['Worker Name'],
+    terms: ['Payment schedule'], rep: ['Worker Name'], idNumber: ['ID number'],
   };
   const TX_COLS = {
     account: ['Account'], voucher: ['voucher'], kind: ['Transaction type'], date: ['Date'],
@@ -158,14 +158,14 @@
         account, name: str(pick(row, bi.name)) || account, warehouse: str(pick(row, bi.warehouse)), group: str(pick(row, bi.group)),
         creditLimit: num(pick(row, bi.creditLimit)), guarantee: Math.max(0, num(pick(row, bi.guarantee))),
         baseBalance: bi.baseBalance >= 0 ? num(row[bi.baseBalance]) : null,
-        terms: str(pick(row, bi.terms)), rep: str(pick(row, bi.rep)) || 'بدون مندوب', inBase: true,
+        terms: str(pick(row, bi.terms)), rep: str(pick(row, bi.rep)) || 'بدون مندوب', idNumber: str(pick(row, bi.idNumber)), inBase: true,
       });
     }
     // Accounts that move but are missing from the customer base still count.
     for (const account of txByAccount.keys()) {
       if (seen.has(account)) continue;
       issues.notInBase++;
-      add({ account, name: account, warehouse: '', group: '', creditLimit: 0, guarantee: 0, baseBalance: null, terms: '', rep: 'بدون مندوب', inBase: false });
+      add({ account, name: account, warehouse: '', group: '', creditLimit: 0, guarantee: 0, baseBalance: null, terms: '', rep: 'بدون مندوب', idNumber: '', inBase: false });
     }
     issues.balanceDiffs = customers.filter((c) => c.baseBalance != null && Math.abs(c.baseBalance - c.balance) >= 1).length;
 

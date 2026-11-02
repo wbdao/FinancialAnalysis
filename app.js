@@ -417,7 +417,8 @@
     try {
       const data = await callScript('add', {
         request: {
-          account: c.account, customer: c.name, rep: c.rep, amount, balance: c.balance, balanceAfter: r.balanceAfter,
+          account: c.account, customer: c.name, rep: c.rep, idNumber: c.idNumber, warehouse: c.warehouse, group: c.group,
+          amount, balance: c.balance, balanceAfter: r.balanceAfter,
           creditLimit: c.creditLimit, guarantee: c.guarantee, uncovered: r.uncovered, overdue: c.overdue,
           oldestDays: c.oldestOverdueDays, dataDate: dateOf(state.result.analysisDay), verdict: r.verdict,
           reasons: Object.values(r.checks).filter((x) => x.level !== 'ok').map((x) => x.label).join('، '),

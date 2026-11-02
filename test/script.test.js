@@ -49,6 +49,21 @@ test('existing columns keep their place and values land under the right header',
   assert.strictEqual(sh.grid[1][1], 5000);
 });
 
+test('customer base fields are stored, and an older sheet gains the new columns at its end', () => {
+  const s = loadScript();
+  const sh = s.book.insertSheet(SHEET);
+  sh.appendRow(['رقم الطلب', 'موقف الاعتماد']);
+  sh.appendRow(['REQ000001', 'معتمد']);
+  const r = s.post({ action: 'add', key: 'req-key', request: request({ idNumber: 'CH-7', warehouse: '65', group: 'Wsagent-H' }) });
+  const header = sh.grid[0];
+  assert.strictEqual(header[0], 'رقم الطلب');
+  assert.strictEqual(sh.grid[2][header.indexOf('ID number')], 'CH-7');
+  assert.strictEqual(sh.grid[2][header.indexOf('Warehouse Group')], '65');
+  assert.strictEqual(sh.grid[2][header.indexOf('Customer group')], 'Wsagent-H');
+  assert.strictEqual(r.request.id, 'REQ000002');
+  assert.strictEqual(sh.grid[1][1], 'معتمد');
+});
+
 test('ids increase, and a clean check needs no approval', () => {
   const s = loadScript();
   const a = s.post({ action: 'add', key: 'req-key', request: request() });
