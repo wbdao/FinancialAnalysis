@@ -110,7 +110,11 @@
     const bi = mapHeader(baseRows[0] || [], BASE_COLS, REQUIRED.base, 'قاعدة العملاء');
     const ti = mapHeader(txRows[0] || [], TX_COLS, REQUIRED.tx, 'حركات العملاء');
     const pick = (row, i) => (i >= 0 ? row[i] : '');
-    const issues = { badDates: 0, zeroRows: 0, futureRows: 0, notInBase: 0, blankGuarantee: 0, balanceDiffs: 0 };
+    const issues = {
+      badDates: 0, zeroRows: 0, futureRows: 0, notInBase: 0, blankGuarantee: 0, balanceDiffs: 0,
+      // Optional for the analysis, but their absence leaves empty cells in the requests sheet.
+      missingColumns: ['idNumber', 'warehouse', 'group'].filter((key) => bi[key] < 0).map((key) => BASE_COLS[key][0]),
+    };
 
     // ---- movements ----------------------------------------------------------
     const tx = [];

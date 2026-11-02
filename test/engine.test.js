@@ -36,6 +36,13 @@ test('customer base fields used by the requests sheet are read', () => {
   assert.strictEqual(c.group, 'Wsagent-H');
 });
 
+test('missing requests-sheet columns are reported by name', () => {
+  const none = Engine.analyze([['Account', 'Name', 'Credit limit'], ['A', 'عميل', 1000]], txSheet([]));
+  assert.deepStrictEqual(none.issues.missingColumns, ['ID number', 'Warehouse Group', 'Customer group']);
+  const all = Engine.analyze([['Account', 'Name', 'Credit limit', 'id number', 'WAREHOUSE GROUP', 'Customer group']], txSheet([]));
+  assert.deepStrictEqual(all.issues.missingColumns, []);
+});
+
 test('FIFO settles the oldest invoice first and leaves the rest open', () => {
   const r = Engine.analyze(
     baseSheet([['A', 'عميل', '', 100000, 100000, 0, 'Net30', 'م']]),

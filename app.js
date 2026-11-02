@@ -126,6 +126,7 @@
 
   function issuesText(issues) {
     const parts = [];
+    if (issues.missingColumns.length) parts.push(`لم أجد في قاعدة العملاء الأعمدة: ${issues.missingColumns.join('، ')}، فستبقى خاناتها فارغة في شيت الطلبات`);
     if (issues.badDates) parts.push(`${issues.badDates} حركة تاريخها غير مقروء ولم تُحسب`);
     if (issues.futureRows) parts.push(`${issues.futureRows} حركة بتاريخ مستقبلي`);
     if (issues.notInBase) parts.push(`${issues.notInBase} حساب غير موجود في قاعدة العملاء، فاعتُبر بلا حد ائتمان أو ضمان`);
@@ -276,6 +277,9 @@
       ${row('المتأخرات', money(c.overdue))}
       ${row('أقدم تأخير', c.oldestOverdueDays ? `${c.oldestOverdueDays} يوم` : '—')}
       ${row('شروط السداد', c.terms || 'غير محددة')}
+      ${row('ID number', c.idNumber || 'فارغ')}
+      ${row('Warehouse Group', c.warehouse || 'فارغ')}
+      ${row('Customer group', c.group || 'فارغ')}
     </dl>`;
   }
 
