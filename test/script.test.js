@@ -6,124 +6,267 @@
 'use strict';
 
 const assert = require('assert');
-const { loadScript, SHEET } = require('./fake-apps-script.js');
+const fs = require('fs');
+const path = require('path');
+const { loadScript, REQUESTS, USERS, LOG } = require('./fake-apps-script.js');
+const Engine = require('../engine.js');
 
-const request = (over) => Object.assign({
-  account: 'A1', customer: 'عميل', rep: 'م', amount: 5000, balance: 1000, balanceAfter: 6000, creditLimit: 3000,
-  guarantee: 2000, uncovered: 4000, overdue: 0, oldestDays: 0, dataDate: '2026-11-02',
-  verdict: 'stop', reasons: 'تجاوز الحد', requester: 'أحمد', note: '', ref: '',
-}, over);
+const day = (y, m, d) => Engine.dayOf(y, m, d);
+const PASS = 'admin-test-pass';
+
+// Two warehouses; A1 is over its limit with late debts, B1 is clean.
+const source = () => ({
+  base: [
+    ['Account', 'Name', 'Credit limit', 'Eligible credit limit', 'Balance', 'Payment schedule', 'Worker Name', 'Warehouse Group', 'Customer group', 'ID number', 'سري'],
+    ['A1', 'عميل أ', 6000, 2000, 5000, 'Net30', 'مندوب', '65', 'Wsagent-H', 'ID-A', 'قيمة لا تخرج'],
+    ['B1', 'عميل ب', 100000, 100000, 1000, 'Net30', 'مندوب', '70', 'Wsagent-E', 'ID-B', 'قيمة لا تخرج'],
+  ],
+  tx: [
+    ['Account', 'Transaction type', 'Date', 'Amount', 'voucher', 'Invoice', 'Description'],
+    ['A1', 'Sales order', new Date(Date.UTC(2026, 0, 1)), 5000, 'V1', 'I1', ''],
+    ['B1', 'Sales order', new Date(Date.UTC(2026, 5, 20)), 1000, 'V2', 'I2', ''],
+    ['B1', 'Payment', new Date(Date.UTC(2026, 5, 30)), -1, 'V3', '', ''],
+  ],
+});
+
+function setup() {
+  const s = loadScript({ source: source() });
+  s.admin = s.post({ action: 'login', username: 'admin', password: PASS }).token;
+  s.call = (token, action, extra) => s.post(Object.assign({ action, token }, extra));
+  s.addUser = (username, role, warehouses = []) => {
+    const r = s.call(s.admin, 'userSave', { username, name: `اسم ${username}`, role, warehouses, password: 'password-1' });
+    assert.ok(r.ok, r.error);
+    return s.post({ action: 'login', username, password: 'password-1' }).token;
+  };
+  return s;
+}
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('the placeholder keys refuse every request', () => {
-  const s = loadScript({ request: 'غيّر-هذا-المفتاح', approve: 'غيّر-هذا-المفتاح' });
-  const r = s.post({ action: 'list', key: 'غيّر-هذا-المفتاح' });
+test('Engine.gs is an exact copy of engine.js', () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r/g, '');
+  assert.strictEqual(read('apps-script/Engine.gs'), read('engine.js'));
+});
+
+test('the placeholder admin password refuses every request', () => {
+  const s = loadScript({ password: 'غيّر-هذه-الكلمة' });
+  const r = s.post({ action: 'login', username: 'admin', password: 'غيّر-هذه-الكلمة' });
   assert.strictEqual(r.ok, false);
-  assert.match(r.error, /غيّر المفتاحين/);
+  assert.match(r.error, /ADMIN_PASSWORD/);
 });
 
-test('a wrong key is refused and the two keys give their roles', () => {
-  const s = loadScript();
-  assert.strictEqual(s.post({ action: 'list', key: 'x' }).ok, false);
-  assert.strictEqual(s.post({ action: 'list', key: 'req-key' }).role, 'requester');
-  assert.strictEqual(s.post({ action: 'list', key: 'app-key' }).role, 'approver');
+test('every action but login needs a session', () => {
+  const s = setup();
+  for (const action of ['data', 'list', 'add', 'users', 'decide']) {
+    const r = s.post({ action, token: 'made-up' });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.login, true);
+  }
+  assert.strictEqual(s.post({ action: 'data' }).login, true);
 });
 
-test('the sheet and its columns are created on first use', () => {
-  const s = loadScript();
-  s.post({ action: 'list', key: 'req-key' });
-  const header = s.sheets.get(SHEET).grid[0];
-  assert.ok(header.includes('رقم الطلب') && header.includes('موقف الاعتماد'));
+test('wrong passwords lock the account and the right one is then refused', () => {
+  const s = setup();
+  s.addUser('sara', 'موظف');
+  for (let i = 0; i < 5; i++) assert.strictEqual(s.post({ action: 'login', username: 'sara', password: 'wrong' }).ok, false);
+  const r = s.post({ action: 'login', username: 'sara', password: 'password-1' });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /مقفول/);
 });
 
-test('existing columns keep their place and values land under the right header', () => {
-  const s = loadScript();
-  const sh = s.book.insertSheet(SHEET);
-  sh.appendRow(['ملاحظة خاصة', 'قيمة الفاتورة']);
-  s.post({ action: 'add', key: 'req-key', request: request() });
-  assert.strictEqual(sh.grid[0][0], 'ملاحظة خاصة');
-  assert.strictEqual(sh.grid[0][1], 'قيمة الفاتورة');
-  assert.strictEqual(sh.grid[1][0], '');
-  assert.strictEqual(sh.grid[1][1], 5000);
+test('passwords are stored hashed and never sent back', () => {
+  const s = setup();
+  s.addUser('sara', 'موظف');
+  const sheet = JSON.stringify(s.book.getSheetByName(USERS).grid);
+  assert.ok(!sheet.includes('password-1'));
+  const listed = JSON.stringify(s.call(s.admin, 'users'));
+  assert.ok(!listed.includes('hash') && !listed.includes('salt') && !listed.includes('password-1'));
 });
 
-test('customer base fields are stored, and an older sheet gains the new columns at its end', () => {
-  const s = loadScript();
-  const sh = s.book.insertSheet(SHEET);
-  sh.appendRow(['رقم الطلب', 'موقف الاعتماد']);
-  sh.appendRow(['REQ000001', 'معتمد']);
-  const r = s.post({ action: 'add', key: 'req-key', request: request({ idNumber: 'CH-7', warehouse: '65', group: 'Wsagent-H' }) });
-  const header = sh.grid[0];
-  assert.strictEqual(header[0], 'رقم الطلب');
-  assert.strictEqual(sh.grid[2][header.indexOf('ID number')], 'CH-7');
-  assert.strictEqual(sh.grid[2][header.indexOf('Warehouse Group')], '65');
-  assert.strictEqual(sh.grid[2][header.indexOf('Customer group')], 'Wsagent-H');
-  assert.strictEqual(r.request.id, 'REQ000002');
-  assert.strictEqual(sh.grid[1][1], 'معتمد');
+test('only the admin manages users and rules', () => {
+  const s = setup();
+  const t = s.addUser('amr', 'معتمد');
+  assert.match(s.call(t, 'users').error, /للمدير فقط/);
+  assert.match(s.call(t, 'userSave', { username: 'x12', role: 'مدير', password: 'password-1' }).error, /للمدير فقط/);
+  assert.match(s.call(t, 'setRules', { overLimit: 'warn', stopDays: 1, tolerance: 1 }).error, /للمدير فقط/);
 });
 
-test('ids increase, and a clean check needs no approval', () => {
-  const s = loadScript();
-  const a = s.post({ action: 'add', key: 'req-key', request: request() });
-  const b = s.post({ action: 'add', key: 'req-key', request: request({ verdict: 'ok' }) });
+test('a user cannot lock themselves out', () => {
+  const s = setup();
+  const t = s.addUser('boss', 'مدير');
+  assert.match(s.call(t, 'userSave', { username: 'boss', role: 'موظف' }).error, /من نفسك/);
+  assert.match(s.call(t, 'userSave', { username: 'boss', role: 'مدير', active: false }).error, /من نفسك/);
+});
+
+test('stopping a user ends their session at once', () => {
+  const s = setup();
+  const t = s.addUser('sara', 'موظف');
+  assert.ok(s.call(t, 'list').ok);
+  s.call(s.admin, 'userSave', { username: 'sara', role: 'موظف', active: false });
+  const r = s.call(t, 'list');
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.login, true);
+  assert.match(s.post({ action: 'login', username: 'sara', password: 'password-1' }).error, /متوقف/);
+});
+
+test('changing a password needs the old one and ends older sessions', () => {
+  const s = setup();
+  const t = s.addUser('sara', 'موظف');
+  assert.match(s.call(t, 'changePassword', { oldPassword: 'wrong', newPassword: 'password-2' }).error, /الحالية/);
+  assert.match(s.call(t, 'changePassword', { oldPassword: 'password-1', newPassword: 'short' }).error, /8/);
+  assert.ok(s.call(t, 'changePassword', { oldPassword: 'password-1', newPassword: 'password-2' }).ok);
+  assert.strictEqual(s.call(t, 'list').login, true);
+  assert.strictEqual(s.post({ action: 'login', username: 'sara', password: 'password-1' }).ok, false);
+  assert.ok(s.post({ action: 'login', username: 'sara', password: 'password-2' }).ok);
+});
+
+test('data: only the engine columns leave the sheet, dates as epoch days', () => {
+  const s = setup();
+  const r = s.call(s.admin, 'data');
+  assert.ok(r.ok, r.error);
+  assert.ok(!JSON.stringify(r).includes('قيمة لا تخرج'));
+  assert.ok(!r.base[0].includes('سري'));
+  const dateAt = r.tx[0].indexOf('Date');
+  assert.strictEqual(r.tx[1][dateAt], day(2026, 1, 1));
+  assert.strictEqual(r.analysisDay, day(2026, 6, 30));
+  assert.strictEqual(r.stats.customers, 2);
+});
+
+test('data: a warehouse user receives only their customers, with the same analysis date', () => {
+  const s = setup();
+  const t = s.addUser('sara', 'موظف', ['65']);
+  const r = s.call(t, 'data');
+  assert.strictEqual(r.base.length, 2);
+  assert.ok(JSON.stringify(r.base).includes('A1'));
+  assert.ok(!JSON.stringify(r).includes('B1'));
+  assert.strictEqual(r.analysisDay, day(2026, 6, 30));
+  const a = Engine.analyze(r.base, r.tx, r.rules, r.analysisDay).customers[0];
+  assert.strictEqual(a.overdue, 5000);
+  assert.strictEqual(r.user.name, 'اسم sara');
+});
+
+test('add: the server computes the check and ignores what the browser claims', () => {
+  const s = setup();
+  const t = s.addUser('sara', 'موظف');
+  const r = s.call(t, 'add', {
+    account: 'A1', amount: 3000, note: 'ملاحظة', ref: 'R1',
+    verdict: 'ok', status: 'معتمد', balance: 0, creditLimit: 999999, requester: 'شخص آخر',
+    request: { verdict: 'ok', status: 'معتمد' },
+  });
+  assert.ok(r.ok, r.error);
+  const q = r.request;
+  assert.strictEqual(q.verdict, 'موقوفة');
+  assert.strictEqual(q.status, 'قيد الاعتماد');
+  assert.strictEqual(q.balance, 5000);
+  assert.strictEqual(q.balanceAfter, 8000);
+  assert.strictEqual(q.creditLimit, 6000);
+  assert.strictEqual(q.requester, 'اسم sara');
+  assert.strictEqual(q.requesterUser, 'sara');
+  assert.strictEqual(q.idNumber, 'ID-A');
+  assert.strictEqual(q.warehouse, '65');
+  assert.strictEqual(q.group, 'Wsagent-H');
+  assert.strictEqual(q.dataDate, '2026-06-30');
+  assert.match(q.reasons, /تجاوز الحد/);
+});
+
+test('add: a clean check needs no approval, ids increase, a retry is not a second request', () => {
+  const s = setup();
+  const a = s.call(s.admin, 'add', { account: 'B1', amount: 100, ref: 'R1' });
   assert.strictEqual(a.request.id, 'REQ000001');
-  assert.strictEqual(a.request.status, 'قيد الاعتماد');
-  assert.strictEqual(a.request.verdict, 'موقوفة');
-  assert.strictEqual(b.request.id, 'REQ000002');
-  assert.strictEqual(b.request.status, 'لا يحتاج اعتماد');
+  assert.strictEqual(a.request.status, 'لا يحتاج اعتماد');
+  assert.strictEqual(s.call(s.admin, 'add', { account: 'B1', amount: 100, ref: 'R1' }).duplicate, true);
+  assert.strictEqual(s.call(s.admin, 'add', { account: 'B1', amount: 100, ref: 'R2' }).request.id, 'REQ000002');
+  assert.strictEqual(s.call(s.admin, 'list').requests.length, 2);
 });
 
-test('a client cannot set the status or approver of a new request', () => {
-  const s = loadScript();
-  const r = s.post({ action: 'add', key: 'req-key', request: request({ status: 'معتمد', approver: 'أنا' }) });
-  assert.strictEqual(r.request.status, 'قيد الاعتماد');
-  assert.strictEqual(r.request.approver, '');
+test('add: outside the warehouse scope or an unknown customer is refused', () => {
+  const s = setup();
+  const t = s.addUser('sara', 'موظف', ['65']);
+  assert.match(s.call(t, 'add', { account: 'B1', amount: 100 }).error, /خارج نطاق/);
+  assert.match(s.call(t, 'add', { account: 'NOPE', amount: 100 }).error, /خارج نطاق/);
+  assert.match(s.call(t, 'add', { account: 'A1', amount: 0 }).error, /أكبر من صفر/);
 });
 
-test('a retried send does not create a second request', () => {
-  const s = loadScript();
-  const a = s.post({ action: 'add', key: 'req-key', request: request({ ref: 'R1' }) });
-  const b = s.post({ action: 'add', key: 'req-key', request: request({ ref: 'R1' }) });
-  assert.strictEqual(b.duplicate, true);
-  assert.strictEqual(b.request.id, a.request.id);
-  assert.strictEqual(s.post({ action: 'list', key: 'req-key' }).requests.length, 1);
+test('rules saved by the admin decide the server check', () => {
+  const s = setup();
+  assert.ok(s.call(s.admin, 'setRules', { overLimit: 'warn', stopDays: 1000, tolerance: 1000000 }).ok);
+  assert.strictEqual(s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request.verdict, 'تحتاج موافقة');
+  assert.strictEqual(s.call(s.admin, 'data').rules.stopDays, 1000);
+  assert.strictEqual(s.call(s.admin, 'setRules', { overLimit: 'x', stopDays: 1, tolerance: 1 }).ok, false);
 });
 
-test('bad requests are refused', () => {
-  const s = loadScript();
-  assert.strictEqual(s.post({ action: 'add', key: 'req-key', request: request({ amount: 0 }) }).ok, false);
-  assert.strictEqual(s.post({ action: 'add', key: 'req-key', request: request({ account: '' }) }).ok, false);
-  assert.strictEqual(s.post({ action: 'add', key: 'req-key', request: request({ verdict: 'x' }) }).ok, false);
-  assert.strictEqual(s.post({ action: 'add', key: 'req-key', request: request({ requester: '' }) }).ok, false);
-  assert.strictEqual(s.post({ action: 'list', key: 'req-key' }).requests.length, 0);
-});
+test('decide: role, own requests, scope, single decision and a current check', () => {
+  const s = setup();
+  const clerk = s.addUser('sara', 'موظف');
+  const approver = s.addUser('amr', 'معتمد');
+  const outsider = s.addUser('nour', 'معتمد', ['70']);
+  const id = s.call(clerk, 'add', { account: 'A1', amount: 3000 }).request.id;
+  const own = s.call(approver, 'add', { account: 'A1', amount: 100 }).request.id;
+  const decide = (t, reqId, decision, note) => s.call(t, 'decide', { id: reqId, decision, note });
 
-test('only the approver key decides, and once only', () => {
-  const s = loadScript();
-  s.post({ action: 'add', key: 'req-key', request: request() });
-  const decide = (key, decision, note) => s.post({ action: 'decide', key, id: 'REQ000001', decision, approver: 'المدير', note });
-  assert.match(decide('req-key', 'approve').error, /مفتاح الاعتماد/);
-  const done = decide('app-key', 'approve', 'استثناء');
+  assert.match(decide(clerk, id, 'approve').error, /معتمد أو مدير/);
+  assert.match(decide(approver, own, 'approve').error, /قدّمته بنفسك/);
+  assert.match(decide(outsider, id, 'approve').error, /خارج نطاق/);
+  assert.match(decide(approver, id, 'reject', '').error, /سبب الرفض/);
+  assert.match(decide(approver, 'REQ9', 'approve').error, /غير موجود/);
+
+  const before = s.call(approver, 'recheck', { id });
+  assert.strictEqual(before.check.verdict, 'stop');
+  const done = decide(approver, id, 'approve', 'استثناء');
   assert.strictEqual(done.request.status, 'معتمد');
-  assert.strictEqual(done.request.approver, 'المدير');
-  assert.strictEqual(done.request.decisionNote, 'استثناء');
-  assert.ok(done.request.decidedAt);
-  assert.match(decide('app-key', 'reject', 'لا').error, /لم يعد قيد الاعتماد/);
+  assert.strictEqual(done.request.approver, 'اسم amr');
+  assert.match(done.request.verdictAtDecision, /موقوفة/);
+  assert.match(decide(approver, id, 'reject', 'لا').error, /لم يعد قيد الاعتماد/);
+  // The admin alone may decide their own request.
+  const adminOwn = s.call(s.admin, 'add', { account: 'A1', amount: 1 }).request.id;
+  assert.strictEqual(decide(s.admin, adminOwn, 'approve').request.status, 'معتمد');
 });
 
-test('a rejection needs a reason and an unknown id is reported', () => {
-  const s = loadScript();
-  s.post({ action: 'add', key: 'req-key', request: request() });
-  assert.match(s.post({ action: 'decide', key: 'app-key', id: 'REQ000001', decision: 'reject', approver: 'م', note: '' }).error, /سبب الرفض/);
-  assert.match(s.post({ action: 'decide', key: 'app-key', id: 'REQ9', decision: 'approve', approver: 'م' }).error, /غير موجود/);
+test('list: a warehouse user sees only requests of their warehouses', () => {
+  const s = setup();
+  s.call(s.admin, 'add', { account: 'A1', amount: 1 });
+  s.call(s.admin, 'add', { account: 'B1', amount: 1 });
+  const t = s.addUser('sara', 'موظف', ['70']);
+  const list = s.call(t, 'list').requests;
+  assert.strictEqual(list.length, 1);
+  assert.strictEqual(list[0].account, 'B1');
+});
+
+test('an older requests sheet keeps its rows and gains the new columns at the end', () => {
+  const s = setup();
+  const sh = s.book.insertSheet(REQUESTS);
+  sh.appendRow(['رقم الطلب', 'موقف الاعتماد', 'عمود خاص']);
+  sh.appendRow(['REQ000007', 'معتمد', 'قيمة']);
+  const r = s.call(s.admin, 'add', { account: 'A1', amount: 1 });
+  assert.strictEqual(r.request.id, 'REQ000008');
+  assert.strictEqual(sh.grid[1][2], 'قيمة');
+  assert.strictEqual(sh.grid[2][sh.grid[0].indexOf('كود العميل')], 'A1');
 });
 
 test('text that looks like a formula is stored as plain text', () => {
-  const s = loadScript();
-  const r = s.post({ action: 'add', key: 'req-key', request: request({ note: '=IMPORTXML("x")' }) });
+  const s = setup();
+  const r = s.call(s.admin, 'add', { account: 'A1', amount: 1, note: '=IMPORTXML("x")' });
   assert.strictEqual(r.request.note, '\'=IMPORTXML("x")');
+});
+
+test('decisions and user changes reach the log, without passwords', () => {
+  const s = setup();
+  s.addUser('sara', 'موظف');
+  const id = s.call(s.admin, 'add', { account: 'A1', amount: 1 }).request.id;
+  s.call(s.admin, 'decide', { id, decision: 'approve' });
+  const log = JSON.stringify(s.book.getSheetByName(LOG).grid);
+  assert.ok(log.includes('إضافة مستخدم') && log.includes('معتمد') && log.includes(id));
+  assert.ok(!log.includes('password-1'));
+});
+
+test('a missing source link gives a clear message', () => {
+  const s = loadScript({ sourceId: '', source: source() });
+  const t = s.post({ action: 'login', username: 'admin', password: PASS }).token;
+  assert.match(s.post({ action: 'data', token: t }).error, /SOURCE_SHEET_ID/);
+  const noAccess = loadScript({ sourceId: 'OTHER', source: source() });
+  const t2 = noAccess.post({ action: 'login', username: 'admin', password: PASS }).token;
+  assert.match(noAccess.post({ action: 'data', token: t2 }).error, /تعذّر فتح شيت العملاء/);
 });
 
 let failed = 0;

@@ -69,6 +69,14 @@ button:disabled { opacity: 0.55; cursor: default; }
 .form-error { color: var(--stop); font-weight: 600; margin-top: 8px; }
 #decision { width: min(480px, calc(100vw - 32px)); }
 #decision .actions { margin-top: 12px; }
+.session { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#view-login .form { margin-top: 40px; max-width: 400px; }
+.rules-form, .users-table { margin-top: 14px; }
+.users-table table { min-width: 640px; }
+.check { display: flex; align-items: center; gap: 8px; }
+.check input { width: auto; margin: 0; }
+.note-box { margin: 10px 0; font-size: 14px; }
+.note-box .tag { margin-inline-start: 6px; }
 .request-form { display: grid; gap: 10px; }
 .request-form .ok-msg { color: var(--ok); font-weight: 600; }
 button:focus-visible, input:focus-visible, select:focus-visible, tr:focus-visible {

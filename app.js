@@ -1,23 +1,17 @@
 /*
- * app.js - loads the sheets and draws the three screens.
+ * app.js - signs in, reads the data through Apps Script and draws the screens.
  *
- * The site reads only: Google Sheets through the public gviz endpoint (JSONP,
- * because that endpoint sends no CORS headers). The sheet link stays in this
- * browser's localStorage and never enters the repository.
+ * Every read and write goes through the script, which checks the session and
+ * cuts the data to the user's warehouses. The check shown here is a preview:
+ * the script recomputes it when a request is registered or decided. Customer
+ * data stays in memory only; just the session token is stored.
  */
 (function () {
   'use strict';
 
-  const SETTINGS_KEY = 'financialAnalysis.settings';
+  const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyhTT5bBIGue4Kbqs2VAuR39us1cUqNFIHPE9DJpnh77vZjM3bmZb74HgMFh67aG0Q/exec';
+  const TOKEN_KEY = 'financialAnalysis.token';
   const PAGE_SIZE = 300;
-  const DEFAULTS = Object.assign(
-    {
-      sheetUrl: '', baseTab: 'قاعده عملاء الشركه', txTab: 'حركات العملاء',
-      scriptUrl: 'https://script.google.com/macros/s/AKfycbyhTT5bBIGue4Kbqs2VAuR39us1cUqNFIHPE9DJpnh77vZjM3bmZb74HgMFh67aG0Q/exec',
-      accessKey: '', userName: '',
-    },
-    Engine.DEFAULT_RULES,
-  );
   const STATUS_TAG = { 'قيد الاعتماد': 'warn', 'معتمد': 'ok', 'مرفوض': 'stop', 'لا يحتاج اعتماد': 'paid' };
   const VERDICT_TAG = { 'سليمة': 'ok', 'تحتاج موافقة': 'warn', 'موقوفة': 'stop' };
   const VERDICT = { ok: 'منتظمة', warn: 'تحتاج متابعة', stop: 'حرجة', paid: 'مسددة' };
@@ -26,6 +20,8 @@
     warn: ['تحتاج موافقة قبل الإصدار', 'توجد ملاحظة أو أكثر تحتاج قرار المسؤول.'],
     stop: ['الفاتورة موقوفة', 'لا تُصدر الفاتورة آجلة قبل معالجة الأسباب الموضحة.'],
   };
+  const ROLE_ADMIN = 'مدير';
+  const ROLE_APPROVER = 'معتمد';
 
   const $ = (id) => document.getElementById(id);
   const money = (v) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(v);
@@ -33,87 +29,120 @@
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
   const state = {
-    settings: loadSettings(), rawSheets: null, isDemo: false, result: null, shown: PAGE_SIZE, bucket: null, filtered: [],
-    requests: [], role: '', lastCheck: null, deciding: null,
+    token: readToken(), user: null, sheets: null, rules: Engine.DEFAULT_RULES, isDemo: false, result: null,
+    shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
   };
 
-  /* ---- settings ------------------------------------------------------------ */
+  /* ---- the script ------------------------------------------------------------ */
 
-  function loadSettings() {
+  function readToken() {
     try {
-      return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(SETTINGS_KEY)));
+      return localStorage.getItem(TOKEN_KEY) || '';
     } catch (e) {
-      return Object.assign({}, DEFAULTS);
+      return '';
     }
   }
 
-  function saveSettings() {
+  function saveToken(token) {
+    state.token = token;
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+      if (token) localStorage.setItem(TOKEN_KEY, token);
+      else localStorage.removeItem(TOKEN_KEY);
     } catch (e) {
-      console.warn('settings not saved', e);
+      console.warn('session not saved', e);
     }
   }
 
-  const rulesFrom = (s) => ({ overLimit: s.overLimit, stopDays: Number(s.stopDays), tolerance: Number(s.tolerance) });
-
-  function fillSettingsForm() {
-    for (const key of Object.keys(DEFAULTS)) $(key).value = state.settings[key];
-  }
-
-  /* ---- Google Sheets read path (gviz JSONP) --------------------------------- */
-
-  let jsonpSeq = 0;
-
-  function gvizRequest(sheetId, tab) {
-    return new Promise((resolve, reject) => {
-      const cb = `__gviz_${Date.now().toString(36)}_${jsonpSeq++}`;
-      const params = new URLSearchParams({ tqx: `out:json;responseHandler:${cb}`, headers: '1', tq: 'select *', sheet: tab });
-      const script = document.createElement('script');
-      const cleanup = () => { delete window[cb]; script.remove(); clearTimeout(timer); };
-      const timer = setTimeout(() => { cleanup(); reject(new Error(`انتهت مهلة قراءة شيت "${tab}".`)); }, 120000);
-      window[cb] = (payload) => { cleanup(); resolve(payload); };
-      script.onerror = () => {
-        cleanup();
-        reject(new Error('تعذّر الوصول إلى Google Sheet. تأكد أن الملف محفوظ كـ Google Sheet وليس xlsx، ومشارك «أي شخص لديه الرابط».'));
-      };
-      script.src = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetId)}/gviz/tq?${params}`;
-      document.head.appendChild(script);
-    });
-  }
-
-  function gvizCell(cell) {
-    if (!cell || cell.v == null) return '';
-    const v = cell.v;
-    if (typeof v === 'string') {
-      const m = /^Date\((\d+),(\d+),(\d+)/.exec(v);
-      if (m) return Date.UTC(+m[1], +m[2], +m[3]) / 86400000;
+  async function callScript(action, payload) {
+    if (state.isDemo) throw new Error('هذه العملية تحتاج تسجيل الدخول، فأنت تستخدم البيانات النموذجية.');
+    let res;
+    try {
+      // text/plain keeps this a simple request, which Apps Script can answer without CORS preflight.
+      res = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ action, token: state.token }, payload)),
+      });
+    } catch (e) {
+      throw new Error('تعذّر الوصول إلى الخادم. تحقق من الاتصال وحاول مرة أخرى.');
     }
-    return v;
-  }
-
-  function gvizToRows(payload, tab) {
-    if (!payload || payload.status === 'error') {
-      const e = (payload && payload.errors && payload.errors[0]) || {};
-      if (e.reason === 'access_denied') throw new Error('الشيت غير مشارك. اجعل الوصول «أي شخص لديه الرابط — عارض».');
-      throw new Error(`خطأ في قراءة شيت "${tab}": ${e.detailed_message || e.message || 'غير معروف'}`);
+    let data;
+    try {
+      data = JSON.parse(await res.text());
+    } catch (e) {
+      throw new Error('رد الخادم غير متوقع. تأكد من نشر آخر إصدار من السكربت بصلاحية Anyone.');
     }
-    const table = payload.table || { cols: [], rows: [] };
-    const header = table.cols.map((c) => (c.label || '').trim());
-    const rows = table.rows.map((r) => (r.c || []).map(gvizCell));
-    // When gviz did not detect a header row, the first data row holds it.
-    if (header.every((h) => !h) && rows.length) return rows;
-    return [header].concat(rows);
+    if (!data.ok) {
+      if (data.login) signedOut(data.error);
+      throw new Error(data.error || 'تعذّر تنفيذ الطلب.');
+    }
+    if (data.user) setUser(data.user);
+    return data;
   }
 
-  const sheetIdFrom = (url) => (/\/spreadsheets\/d\/([\w-]+)/.exec(url || '') || [])[1] || '';
+  /* ---- session --------------------------------------------------------------- */
 
-  async function loadFromSheet() {
-    const { sheetUrl, baseTab, txTab } = state.settings;
-    const id = sheetIdFrom(sheetUrl);
-    if (!id) throw new Error('الرابط غير صحيح. الصق رابط Google Sheet كاملًا.');
-    const [base, tx] = await Promise.all([gvizRequest(id, baseTab), gvizRequest(id, txTab)]);
-    return { base: gvizToRows(base, baseTab), tx: gvizToRows(tx, txTab) };
+  const canDecide = () => !!state.user && (state.user.role === ROLE_ADMIN || state.user.role === ROLE_APPROVER);
+  const isAdmin = () => !!state.user && state.user.role === ROLE_ADMIN;
+
+  function setUser(user) {
+    state.user = user;
+    const scope = user.warehouses && user.warehouses.length ? user.warehouses.join('، ') : 'كل المخازن';
+    $('whoami').textContent = `${user.name} · ${user.role} · ${scope}`;
+    document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = !isAdmin(); });
+  }
+
+  function clearData() {
+    Object.assign(state, { user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null, isDemo: false });
+    for (const id of ['rows', 'kpis', 'aging', 'requestRows', 'userRows', 'checkResult', 'customerList']) $(id).innerHTML = '';
+    document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = true; });
+    $('stamp').textContent = 'الائتمان والضمان والمتأخرات';
+  }
+
+  function signedOut(message) {
+    saveToken('');
+    clearData();
+    $('tabs').hidden = true;
+    $('session').hidden = true;
+    banner('');
+    $('loginError').textContent = message || '';
+    $('loginError').hidden = !message;
+    $('loginPass').value = '';
+    for (const d of ['detail', 'decision']) if ($(d).open) $(d).close();
+    show('login');
+  }
+
+  function signedIn() {
+    $('tabs').hidden = false;
+    $('session').hidden = false;
+  }
+
+  async function login(event) {
+    event.preventDefault();
+    $('loginSubmit').disabled = true;
+    $('loginError').hidden = true;
+    try {
+      const data = await callScript('login', { username: $('loginUser').value, password: $('loginPass').value });
+      saveToken(data.token);
+      $('loginPass').value = '';
+      signedIn();
+      await loadData();
+    } catch (e) {
+      $('loginError').textContent = e.message;
+      $('loginError').hidden = false;
+    } finally {
+      $('loginSubmit').disabled = false;
+    }
+  }
+
+  async function logout() {
+    if (state.isDemo) { signedOut(); return; }
+    try {
+      await callScript('logout');
+    } catch (e) {
+      console.warn('logout not confirmed', e);
+    }
+    signedOut();
   }
 
   /* ---- load and analyze ------------------------------------------------------ */
@@ -130,50 +159,53 @@
     if (issues.badDates) parts.push(`${issues.badDates} حركة تاريخها غير مقروء ولم تُحسب`);
     if (issues.futureRows) parts.push(`${issues.futureRows} حركة بتاريخ مستقبلي`);
     if (issues.notInBase) parts.push(`${issues.notInBase} حساب غير موجود في قاعدة العملاء، فاعتُبر بلا حد ائتمان أو ضمان`);
-    if (issues.blankGuarantee) parts.push(`${issues.blankGuarantee} عميل خانة ضمانه فارغة، وربما الرقم مسجل كنص`);
+    if (issues.blankGuarantee) parts.push(`${issues.blankGuarantee} عميل خانة ضمانه فارغة`);
     if (issues.balanceDiffs) parts.push(`${issues.balanceDiffs} عميل رصيده المحسوب من الحركات يختلف عن رصيد القاعدة`);
     return parts.length ? `مراجعة البيانات: ${parts.join('، ')}.` : '';
   }
 
   function recompute() {
-    state.result = Engine.analyze(state.rawSheets.base, state.rawSheets.tx, rulesFrom(state.settings));
+    const { base, tx, analysisDay } = state.sheets;
+    state.result = Engine.analyze(base, tx, state.rules, analysisDay);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
-    const { analysisDay, issues } = state.result;
-    $('stamp').textContent = `${state.isDemo ? 'بيانات نموذجية · ' : ''}المتأخرات محسوبة حتى ${dateOf(analysisDay)} (آخر حركة في الشيت)`;
+    $('stamp').textContent = `${state.isDemo ? 'بيانات نموذجية · ' : ''}المتأخرات محسوبة حتى ${dateOf(state.result.analysisDay)} (آخر حركة في الشيت)`;
     const demoNote = state.isDemo ? 'هذه بيانات نموذجية للتجربة وليست بيانات حقيقية. ' : '';
-    banner((demoNote + issuesText(issues)).trim());
+    banner((demoNote + issuesText(state.result.issues)).trim());
     fillRepFilter();
     fillCustomerList();
+    fillRulesForm();
     state.shown = PAGE_SIZE;
     renderInvoices();
     $('checkResult').innerHTML = '';
   }
 
-  async function load() {
-    if (!state.settings.sheetUrl) {
-      show('settings');
-      banner('الصق رابط Google Sheet لبدء التحليل، أو جرّب البيانات النموذجية.');
-      return;
-    }
-    banner('جارٍ قراءة الشيت…');
+  async function loadData() {
+    banner('جارٍ قراءة البيانات من الشيت، وقد يستغرق ذلك بعض الوقت…');
     $('reload').disabled = true;
     try {
-      state.rawSheets = await loadFromSheet();
-      state.isDemo = false;
+      const data = await callScript('data');
+      state.sheets = { base: data.base, tx: data.tx, analysisDay: data.analysisDay };
+      state.rules = data.rules;
+      console.info('data read', data.stats);
       recompute();
       show('invoices');
     } catch (e) {
       console.error(e);
-      banner(e.message, true);
-      show('settings');
+      if (state.token) banner(e.message, true);
     } finally {
       $('reload').disabled = false;
     }
   }
 
   function loadDemo() {
-    state.rawSheets = window.demoSheets();
+    const { base, tx } = window.demoSheets();
     state.isDemo = true;
+    state.sheets = { base, tx, analysisDay: null };
+    state.rules = Engine.DEFAULT_RULES;
+    state.user = null;
+    $('whoami').textContent = 'وضع التجربة';
+    $('loginError').hidden = true;
+    signedIn();
     recompute();
     show('invoices');
   }
@@ -181,7 +213,7 @@
   /* ---- navigation ------------------------------------------------------------- */
 
   function show(view) {
-    for (const name of ['invoices', 'check', 'requests', 'settings']) $(`view-${name}`).hidden = name !== view;
+    for (const name of ['login', 'invoices', 'check', 'requests', 'users', 'settings']) $(`view-${name}`).hidden = name !== view;
     document.querySelectorAll('.tabs button').forEach((b) => {
       if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
@@ -291,7 +323,7 @@
       : '';
     const others = c.invoices.filter((x) => x.isOpen && x !== inv);
     $('detailBody').innerHTML = `
-      <h2>${esc(inv.type)} ${esc(inv.number)} <span class="tag ${inv.verdict}">${VERDICT[inv.verdict]}</span></h2>
+      <h2 id="detailTitle">${esc(inv.type)} ${esc(inv.number)} <span class="tag ${inv.verdict}">${VERDICT[inv.verdict]}</span></h2>
       <p class="muted">${esc(inv.customer)} · ${esc(inv.account)}</p>
       <h3>الفاتورة</h3>
       <div class="panel"><dl>
@@ -345,9 +377,9 @@
 
   function renderCheck(event) {
     event.preventDefault();
-    if (!state.result) { $('checkResult').innerHTML = '<p class="empty">حمّل البيانات أولًا من الإعدادات.</p>'; return; }
+    if (!state.result) { $('checkResult').innerHTML = '<p class="empty">انتظر تحميل البيانات أولًا.</p>'; return; }
     const c = findCustomer($('checkCustomer').value);
-    if (!c) { $('checkResult').innerHTML = '<p class="empty">لم أجد هذا العميل. اختره من القائمة.</p>'; return; }
+    if (!c) { $('checkResult').innerHTML = '<p class="empty">لم أجد هذا العميل في نطاقك. اختره من القائمة.</p>'; return; }
     const amount = Number($('checkAmount').value);
     const r = Engine.evaluateNew(c, amount, state.result.rules);
     // One ref per check, so a retried send cannot register the request twice.
@@ -384,53 +416,26 @@
     $('sendRequest').addEventListener('click', sendRequest);
   }
 
-  /* ---- requests and approvals (Apps Script) ------------------------------------ */
-
-  async function callScript(action, payload) {
-    const { scriptUrl, accessKey } = state.settings;
-    if (!scriptUrl || !accessKey) throw new Error('اكتب رابط Apps Script ومفتاح الدخول في الإعدادات.');
-    // text/plain keeps this a simple request, which Apps Script can answer without CORS preflight.
-    const res = await fetch(scriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ action, key: accessKey }, payload)),
-    });
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      throw new Error('رد السكربت غير متوقع. تأكد من لصق Code.gs ونشر إصدار جديد بصلاحية Anyone.');
-    }
-    if (!data.ok) throw new Error(data.error || 'تعذّر تنفيذ الطلب.');
-    if (data.role) state.role = data.role;
-    return data;
-  }
+  /* ---- requests and approvals --------------------------------------------------- */
 
   async function sendRequest() {
     const { c, r, amount, ref } = state.lastCheck;
     const msg = $('requestMsg');
     if (state.isDemo) {
       msg.className = 'form-error';
-      msg.textContent = 'لا يمكن تسجيل طلب من البيانات النموذجية، حتى لا تصل بيانات وهمية إلى الشيت.';
+      msg.textContent = 'لا يمكن تسجيل طلب من البيانات النموذجية.';
       return;
     }
     $('sendRequest').disabled = true;
     msg.className = '';
-    msg.textContent = 'جارٍ التسجيل…';
+    msg.textContent = 'جارٍ الفحص في الخادم والتسجيل، وقد يستغرق ذلك بعض الوقت…';
     try {
-      const data = await callScript('add', {
-        request: {
-          account: c.account, customer: c.name, rep: c.rep, idNumber: c.idNumber, warehouse: c.warehouse, group: c.group,
-          amount, balance: c.balance, balanceAfter: r.balanceAfter,
-          creditLimit: c.creditLimit, guarantee: c.guarantee, uncovered: r.uncovered, overdue: c.overdue,
-          oldestDays: c.oldestOverdueDays, dataDate: dateOf(state.result.analysisDay), verdict: r.verdict,
-          reasons: Object.values(r.checks).filter((x) => x.level !== 'ok').map((x) => x.label).join('، '),
-          requester: state.settings.userName, note: $('requestNote').value, ref,
-        },
-      });
+      const data = await callScript('add', { account: c.account, amount, note: $('requestNote').value, ref });
+      const previewLabel = { ok: 'سليمة', warn: 'تحتاج موافقة', stop: 'موقوفة' }[r.verdict];
+      const changed = data.request.verdict !== previewLabel
+        ? ` تغيّرت نتيجة الفحص إلى "${data.request.verdict}" لأن الخادم استخدم أحدث البيانات.` : '';
       msg.className = 'ok-msg';
-      msg.textContent = `تم تسجيل الطلب ${data.request.id}: ${data.request.status}.`;
+      msg.textContent = `تم تسجيل الطلب ${data.request.id}: ${data.request.status}.${changed}`;
     } catch (e) {
       msg.className = 'form-error';
       msg.textContent = e.message;
@@ -464,8 +469,9 @@
       $('requestRows').innerHTML = '<tr><td colspan="7" class="empty">لا توجد طلبات مطابقة.</td></tr>';
       return;
     }
+    const own = (r) => state.user && String(r.requesterUser).toLowerCase() === state.user.username;
     $('requestRows').innerHTML = list.map((r) => `
-      <tr class="plain">
+      <tr>
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
         <td>${esc(r.customer)}<span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
         <td class="n">${money(r.amount)}</td>
@@ -473,37 +479,156 @@
         <td>${esc(r.requester)}${r.note ? `<span class="sub">${esc(r.note)}</span>` : ''}</td>
         <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>
           ${r.approver ? `<span class="sub">${esc(r.approver)} · ${esc(r.decidedAt)}</span>` : ''}
+          ${r.verdictAtDecision ? `<span class="sub">عند القرار: ${esc(r.verdictAtDecision)}</span>` : ''}
           ${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
-        <td>${state.role === 'approver' && r.status === 'قيد الاعتماد' ? `<button type="button" class="ghost" data-id="${esc(r.id)}">قرار</button>` : ''}</td>
+        <td>${canDecide() && r.status === 'قيد الاعتماد' && (isAdmin() || !own(r)) ? `<button type="button" class="ghost" data-id="${esc(r.id)}">قرار</button>` : ''}</td>
       </tr>`).join('');
   }
 
-  function openDecision(id) {
+  async function openDecision(id) {
     const r = state.requests.find((x) => x.id === id);
     if (!r) return;
     state.deciding = r;
     $('decisionTitle').textContent = `قرار الطلب ${r.id}`;
-    $('decisionInfo').textContent = `${r.customer} · ${money(r.amount)} · الرصيد بعد الفاتورة ${money(r.balanceAfter)} من حد ${money(r.creditLimit)} · الضمان ${money(r.guarantee)} · المتأخرات ${money(r.overdue)}`;
+    $('decisionInfo').textContent = `${r.customer} · ${money(r.amount)} · عند التسجيل: ${r.verdict}`;
+    $('decisionCurrent').textContent = 'جارٍ فحص الطلب بالبيانات الحالية…';
     $('decisionNote').value = '';
     $('decisionError').hidden = true;
+    $('approve').disabled = $('reject').disabled = true;
     $('decision').showModal();
+    try {
+      const { check } = await callScript('recheck', { id });
+      if (state.deciding !== r) return;
+      $('decisionCurrent').innerHTML = `
+        <b>الموقف الآن:</b><span class="tag ${check.verdict}">${esc(check.verdictLabel)}</span>
+        <span class="sub">الرصيد بعد الفاتورة ${money(check.balanceAfter)} من حد ${money(check.creditLimit)} · الضمان ${money(check.guarantee)} · المتأخرات ${money(check.overdue)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
+      $('approve').disabled = $('reject').disabled = false;
+    } catch (e) {
+      $('decisionCurrent').textContent = '';
+      $('decisionError').textContent = e.message;
+      $('decisionError').hidden = false;
+    }
   }
 
   async function decide(decision) {
     $('approve').disabled = $('reject').disabled = true;
     $('decisionError').hidden = true;
     try {
-      const data = await callScript('decide', {
-        id: state.deciding.id, decision, approver: state.settings.userName, note: $('decisionNote').value,
-      });
+      const data = await callScript('decide', { id: state.deciding.id, decision, note: $('decisionNote').value });
       state.requests = state.requests.map((r) => (r.id === data.request.id ? data.request : r));
       $('decision').close();
       renderRequests();
     } catch (e) {
       $('decisionError').textContent = e.message;
       $('decisionError').hidden = false;
-    } finally {
       $('approve').disabled = $('reject').disabled = false;
+    }
+  }
+
+  /* ---- users (admin) -------------------------------------------------------------- */
+
+  async function loadUsers() {
+    try {
+      const data = await callScript('users');
+      state.users = data.users;
+      renderUsers();
+    } catch (e) {
+      $('userRows').innerHTML = `<tr><td colspan="6" class="empty">${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  function renderUsers() {
+    if (!state.users.length) {
+      $('userRows').innerHTML = '<tr><td colspan="6" class="empty">لا يوجد مستخدمون بعد. أضف أول مستخدم من النموذج.</td></tr>';
+      return;
+    }
+    $('userRows').innerHTML = state.users.map((u) => `
+      <tr>
+        <td dir="ltr" class="start">${esc(u.username)}</td>
+        <td>${esc(u.name)}</td>
+        <td>${esc(u.role)}</td>
+        <td>${esc(u.warehouses.length ? u.warehouses.join('، ') : 'الكل')}</td>
+        <td><span class="tag ${u.active ? 'ok' : 'paid'}">${u.active ? 'مفعّل' : 'متوقف'}</span></td>
+        <td><button type="button" class="ghost" data-user="${esc(u.username)}">تعديل</button></td>
+      </tr>`).join('');
+  }
+
+  function clearUserForm() {
+    $('userForm').reset();
+    $('userUsername').readOnly = false;
+    $('userError').hidden = true;
+  }
+
+  function editUser(username) {
+    const u = state.users.find((x) => x.username === username);
+    if (!u) return;
+    clearUserForm();
+    $('userUsername').value = u.username;
+    $('userUsername').readOnly = true;
+    $('userName').value = u.name;
+    $('userRole').value = u.role;
+    $('userWarehouses').value = u.warehouses.join('، ');
+    $('userActive').checked = u.active;
+    $('userForm').scrollIntoView({ block: 'nearest' });
+  }
+
+  async function saveUser(event) {
+    event.preventDefault();
+    $('userSubmit').disabled = true;
+    $('userError').hidden = true;
+    try {
+      const data = await callScript('userSave', {
+        username: $('userUsername').value, name: $('userName').value, role: $('userRole').value, active: $('userActive').checked,
+        warehouses: $('userWarehouses').value.split(/[،,]/).map((x) => x.trim()).filter(Boolean),
+        password: $('userPassword').value,
+      });
+      state.users = data.users;
+      renderUsers();
+      clearUserForm();
+    } catch (e) {
+      $('userError').textContent = e.message;
+      $('userError').hidden = false;
+    } finally {
+      $('userSubmit').disabled = false;
+    }
+  }
+
+  /* ---- settings ------------------------------------------------------------------- */
+
+  function fillRulesForm() {
+    $('overLimit').value = state.rules.overLimit;
+    $('stopDays').value = state.rules.stopDays;
+    $('tolerance').value = state.rules.tolerance;
+  }
+
+  function formMessage(el, text, isError) {
+    el.className = isError ? 'form-error' : 'ok-msg';
+    el.textContent = text;
+  }
+
+  async function changePassword(event) {
+    event.preventDefault();
+    try {
+      await callScript('changePassword', { oldPassword: $('oldPassword').value, newPassword: $('newPassword').value });
+      signedOut('تم تغيير كلمة المرور. سجّل الدخول بالكلمة الجديدة.');
+    } catch (e) {
+      formMessage($('passwordMsg'), e.message, true);
+    } finally {
+      $('passwordForm').reset();
+    }
+  }
+
+  async function saveRules(event) {
+    event.preventDefault();
+    try {
+      const data = await callScript('setRules', {
+        overLimit: $('overLimit').value, stopDays: Number($('stopDays').value), tolerance: Number($('tolerance').value),
+      });
+      state.rules = data.rules;
+      recompute();
+      formMessage($('rulesMsg'), 'تم حفظ القواعد.');
+    } catch (e) {
+      formMessage($('rulesMsg'), e.message, true);
     }
   }
 
@@ -544,7 +669,12 @@
   document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => {
     show(b.dataset.view);
     if (b.dataset.view === 'requests') loadRequests();
+    if (b.dataset.view === 'users') loadUsers();
   }));
+  $('loginForm').addEventListener('submit', login);
+  $('logout').addEventListener('click', logout);
+  $('demo').addEventListener('click', loadDemo);
+  $('reload').addEventListener('click', () => (state.isDemo ? loadDemo() : loadData()));
   $('requestStatus').addEventListener('change', renderRequests);
   $('requestsReload').addEventListener('click', loadRequests);
   $('requestRows').addEventListener('click', (e) => {
@@ -554,8 +684,14 @@
   $('approve').addEventListener('click', () => decide('approve'));
   $('reject').addEventListener('click', () => decide('reject'));
   $('decisionClose').addEventListener('click', () => $('decision').close());
-  $('reload').addEventListener('click', () => (state.isDemo ? loadDemo() : load()));
-  $('demo').addEventListener('click', loadDemo);
+  $('userForm').addEventListener('submit', saveUser);
+  $('userClear').addEventListener('click', clearUserForm);
+  $('userRows').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-user]');
+    if (b) editUser(b.dataset.user);
+  });
+  $('passwordForm').addEventListener('submit', changePassword);
+  $('rulesForm').addEventListener('submit', saveRules);
   $('q').addEventListener('input', refilter);
   $('verdict').addEventListener('change', refilter);
   $('rep').addEventListener('change', refilter);
@@ -573,14 +709,12 @@
   $('rows').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') openRow(e.target.closest('tr'));
   });
-  $('settingsForm').addEventListener('submit', (e) => {
-    e.preventDefault();
-    for (const key of Object.keys(DEFAULTS)) state.settings[key] = $(key).value.trim();
-    saveSettings();
-    if (state.isDemo && !state.settings.sheetUrl) recompute();
-    else load();
-  });
 
-  fillSettingsForm();
-  load();
+  if (state.token) {
+    signedIn();
+    show('invoices');
+    loadData();
+  } else {
+    show('login');
+  }
 })();

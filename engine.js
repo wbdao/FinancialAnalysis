@@ -100,12 +100,33 @@
   /* ---- the analysis --------------------------------------------------------- */
 
   /**
+   * lastMovementDay - the analysis date: the last real movement in the sheet.
+   * Rows with no amount or dated after today are ignored: a date typed day/month
+   * into a month/day sheet must not age every debt.
+   */
+  function lastMovementDay(txRows) {
+    const ti = mapHeader(txRows[0] || [], TX_COLS, REQUIRED.tx, 'حركات العملاء');
+    const today = Math.floor(Date.now() / 86400000);
+    let best = -Infinity;
+    for (let r = 1; r < txRows.length; r++) {
+      const row = txRows[r];
+      const day = row[ti.date];
+      if (!str(row[ti.account]) || typeof day !== 'number' || !isFinite(day) || num(row[ti.amount]) === 0) continue;
+      const d = Math.floor(day);
+      if (d <= today + 1 && d > best) best = d;
+    }
+    return isFinite(best) ? best : today;
+  }
+
+  /**
    * analyze - every debit as an invoice with its position, plus customer totals.
    * @param {!Array<!Array>} baseRows customers sheet, header first
    * @param {!Array<!Array>} txRows movements sheet, header first, dates as epoch days
    * @param {!Object=} rulesIn overrides of DEFAULT_RULES
+   * @param {?number=} analysisDayIn the date to age against. A user limited to
+   *     some warehouses gets it from the whole sheet, so their aging matches everyone's.
    */
-  function analyze(baseRows, txRows, rulesIn) {
+  function analyze(baseRows, txRows, rulesIn, analysisDayIn) {
     const rules = Object.assign({}, DEFAULT_RULES, rulesIn);
     const bi = mapHeader(baseRows[0] || [], BASE_COLS, REQUIRED.base, 'قاعدة العملاء');
     const ti = mapHeader(txRows[0] || [], TX_COLS, REQUIRED.tx, 'حركات العملاء');
@@ -118,7 +139,7 @@
 
     // ---- movements ----------------------------------------------------------
     const tx = [];
-    let analysisDay = -Infinity;
+    const analysisDay = analysisDayIn != null ? analysisDayIn : lastMovementDay(txRows);
     const todayCap = Math.floor(Date.now() / 86400000) + 1;
     for (let r = 1; r < txRows.length; r++) {
       const row = txRows[r];
@@ -132,12 +153,9 @@
       };
       if (t.invoice === '0') t.invoice = '';
       if (t.amount === 0) { issues.zeroRows++; continue; }
-      // A date typed day/month into a month/day sheet must not age every debt.
       if (t.day > todayCap) issues.futureRows++;
-      else if (t.day > analysisDay) analysisDay = t.day;
       tx.push(t);
     }
-    if (!isFinite(analysisDay)) analysisDay = Math.floor(Date.now() / 86400000);
     tx.sort((a, b) => a.day - b.day || b.amount - a.amount);
     const txByAccount = new Map();
     for (const t of tx) {
@@ -315,7 +333,7 @@
     return s;
   }
 
-  const Engine = { analyze, evaluateNew, termDays, bucketOf, dayOf, DEFAULT_RULES, AGING_BUCKETS };
+  const Engine = { analyze, evaluateNew, lastMovementDay, termDays, bucketOf, dayOf, DEFAULT_RULES, AGING_BUCKETS, BASE_COLS, TX_COLS };
   if (typeof module !== 'undefined' && module.exports) module.exports = Engine;
   else root.Engine = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);
