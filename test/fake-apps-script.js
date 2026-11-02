@@ -49,6 +49,7 @@ function fakeBook() {
   const sheets = new Map();
   return {
     sheets,
+    getSheets: () => [...sheets.entries()].map(([n, s]) => Object.assign(s, { getName: () => n })),
     getSheetByName: (n) => sheets.get(n) || null,
     insertSheet: (n) => { sheets.set(n, new FakeSheet()); return sheets.get(n); },
     getSpreadsheetTimeZone: () => 'UTC',

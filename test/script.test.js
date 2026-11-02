@@ -260,6 +260,35 @@ test('decisions and user changes reach the log, without passwords', () => {
   assert.ok(!log.includes('password-1'));
 });
 
+test('source tabs are found despite spaces and spelling, or the real names are listed', () => {
+  const rename = (s, from, to) => {
+    s.sourceBook.sheets.set(to, s.sourceBook.sheets.get(from));
+    s.sourceBook.sheets.delete(from);
+  };
+  const dataOf = (s) => s.post({ action: 'data', token: s.admin });
+
+  const spaced = setup();
+  rename(spaced, 'قاعده عملاء الشركه', ' قاعدة  عملاء الشركة ');
+  assert.ok(dataOf(spaced).ok, dataOf(spaced).error);
+
+  const hinted = setup();
+  rename(hinted, 'قاعده عملاء الشركه', 'قاعدة العملاء 2026');
+  rename(hinted, 'حركات العملاء', 'حركات 2026');
+  assert.strictEqual(dataOf(hinted).stats.customers, 2);
+
+  const wrong = setup();
+  rename(wrong, 'قاعده عملاء الشركه', 'Customers');
+  const r = dataOf(wrong);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /"Customers"/);
+  assert.match(r.error, /"حركات العملاء"/);
+
+  const twoLike = setup();
+  rename(twoLike, 'قاعده عملاء الشركه', 'قاعدة 1');
+  twoLike.sourceBook.insertSheet('قاعدة 2');
+  assert.match(dataOf(twoLike).error, /التبويبات الموجودة/);
+});
+
 test('a missing source link gives a clear message', () => {
   const s = loadScript({ sourceId: '', source: source() });
   const t = s.post({ action: 'login', username: 'admin', password: PASS }).token;

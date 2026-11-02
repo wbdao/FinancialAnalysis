@@ -22,7 +22,7 @@ const TX_TAB = 'حركات العملاء';
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-03-a3';
+const BUILD = '2026-11-03-a4';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -358,12 +358,26 @@ function sourceBook_() {
   }
 }
 
+// Tolerates extra spaces and common spelling variants, as CSAccounts does.
+function findTab_(book, tab) {
+  const norm = function (s) {
+    return text_(s).replace(/\s+/g, ' ').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي');
+  };
+  const tabs = book.getSheets();
+  const same = tabs.filter(function (s) { return norm(s.getName()) === norm(tab); });
+  if (same.length === 1) return same[0];
+  const hint = tab === BASE_TAB ? /عملاء الشرك|قاعد/ : /حركات/;
+  const like = tabs.filter(function (s) { return hint.test(norm(s.getName())); });
+  if (like.length === 1) return like[0];
+  const names = tabs.map(function (s) { return '"' + s.getName() + '"'; }).join('، ');
+  throw new Error('لم أجد شيت "' + tab + '" في شيت العملاء. التبويبات الموجودة: ' + names + '. اكتب الاسم الصحيح في BASE_TAB أو TX_TAB.');
+}
+
 function isDate_(v) { return Object.prototype.toString.call(v) === '[object Date]'; }
 
 // Only the columns the engine knows leave the sheet, with dates as epoch days.
 function sourceRows_(book, tab, spec) {
-  const sh = book.getSheetByName(tab);
-  if (!sh) throw new Error('لم أجد شيت "' + tab + '" في شيت العملاء.');
+  const sh = findTab_(book, tab);
   const values = sh.getDataRange().getValues();
   if (!values.length) return [[]];
   const wanted = {};
