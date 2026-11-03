@@ -26,7 +26,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-04-a5';
+const BUILD = '2026-11-04-a6';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -49,6 +49,10 @@ const MIN_PASSWORD = 8;
 const MAX_FAILS = 5;
 const LOCK_MINUTES = 15;
 const RULES_KEY = 'rules';
+// A just-checked customer is reused for a short while, so the approve click
+// after reading the decision does not read the sheets again.
+const EVAL_CACHE = 'eval:v1';
+const EVAL_TTL = 60;
 
 // اسم الحقل في الموقع ← اسم العمود في الشيت
 const COLUMNS = {
@@ -508,13 +512,45 @@ function data_(who) {
 
 /* ---- the check, computed here so a browser cannot change its result ---- */
 
+// Only the fields the check reads: invoices and aging can be large, and the
+// cache must stay well under its value limit for a customer with many invoices.
+function slimCustomer_(c) {
+  return {
+    account: c.account, name: c.name, rep: c.rep, idNumber: c.idNumber, warehouse: c.warehouse, group: c.group,
+    balance: c.balance, creditLimit: c.creditLimit, guarantee: c.guarantee, exposure: c.exposure,
+    availableCredit: c.availableCredit, overdue: c.overdue, oldestOverdueDays: c.oldestOverdueDays,
+    stopped: c.stopped, hasChecks: c.hasChecks,
+    checksOpen: c.checksOpen, checksOpenCount: c.checksOpenCount, checksDue: c.checksDue,
+    checksDueCount: c.checksDueCount, checksRejected: c.checksRejected, checksRejectedCount: c.checksRejectedCount,
+  };
+}
+
 function evaluate_(who, account, amount) {
-  const sheets = scopedSheets_(who, account);
-  if (sheets.base.length < 2) throw new Error('العميل غير موجود في قاعدة العملاء أو خارج نطاق مخازنك: ' + account);
   const rules = rules_();
-  // Unlike the screens, a request is never checked without the checks: a failure stops it.
-  const checks = checksOf_(sheets.mine);
-  const c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, checks).customers[0];
+  const cache = CacheService.getScriptCache();
+  // The scope and rules are part of the key, so two users never share a
+  // customer they may not see, and changing the rules invalidates the result.
+  const key = EVAL_CACHE + ':' + sha_(account + '|' + who.warehouses.join(',') + '|' + JSON.stringify(rules));
+  let c = null, analysisDay = 0;
+  const hit = cache.get(key);
+  if (hit) {
+    try {
+      const packed = JSON.parse(hit);
+      c = packed.c;
+      analysisDay = packed.day;
+    } catch (e) {
+      c = null;
+    }
+  }
+  if (!c) {
+    const sheets = scopedSheets_(who, account);
+    if (sheets.base.length < 2) throw new Error('العميل غير موجود في قاعدة العملاء أو خارج نطاق مخازنك: ' + account);
+    // Unlike the screens, a request is never checked without the checks: a failure stops it.
+    const checks = checksOf_(sheets.mine);
+    c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, checks).customers[0];
+    analysisDay = sheets.analysisDay;
+    try { cache.put(key, JSON.stringify({ c: slimCustomer_(c), day: analysisDay }), EVAL_TTL); } catch (e) { /* the cache is optional */ }
+  }
   const result = Engine.evaluateNew(c, amount, rules);
   const reasons = Object.keys(result.checks)
     .map(function (k) { return result.checks[k]; })
@@ -525,7 +561,7 @@ function evaluate_(who, account, amount) {
     amount: amount, balance: c.balance, balanceAfter: result.balanceAfter, creditLimit: c.creditLimit, guarantee: c.guarantee,
     uncovered: result.uncovered, overdue: c.overdue, oldestDays: c.oldestOverdueDays,
     checksOpen: c.checksOpen, checksDue: c.checksDue, checksRejected: c.checksRejected, exposureAfter: result.exposureAfter,
-    dataDate: Utilities.formatDate(new Date(sheets.analysisDay * 86400000), 'UTC', 'yyyy-MM-dd'),
+    dataDate: Utilities.formatDate(new Date(analysisDay * 86400000), 'UTC', 'yyyy-MM-dd'),
     verdict: result.verdict, verdictLabel: VERDICTS[result.verdict], reasons: reasons,
   };
 }

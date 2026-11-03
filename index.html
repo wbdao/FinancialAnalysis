@@ -4,222 +4,387 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>موقف الفواتير</title>
-  <link rel="stylesheet" href="styles.css?v=6">
+  <meta name="theme-color" content="#0b2f29">
+  <title>موقف الفواتير · لوحة التحكم</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css?v=8">
 </head>
-<body>
-  <header class="top">
-    <div class="brand">
-      <h1>موقف الفواتير</h1>
-      <p id="stamp" class="muted">الائتمان والضمان والمتأخرات</p>
-    </div>
-    <nav id="tabs" class="tabs" aria-label="الشاشات" hidden>
-      <button type="button" data-view="invoices" aria-current="page">الفواتير</button>
-      <button type="button" data-view="check">فحص فاتورة جديدة</button>
-      <button type="button" data-view="requests">الطلبات والاعتمادات</button>
-      <button type="button" data-view="users" data-admin hidden>المستخدمون</button>
-      <button type="button" data-view="settings">الإعدادات</button>
-    </nav>
-    <div id="session" class="session" hidden>
-      <span id="whoami" class="muted"></span>
-      <button type="button" id="reload" class="ghost">تحديث البيانات</button>
-      <button type="button" id="logout" class="ghost">خروج</button>
-    </div>
-  </header>
+<body data-view="login">
 
-  <div id="banner" class="banner" hidden></div>
+  <!-- Icon sprite -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+    <symbol id="i-invoices" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-requests" viewBox="0 0 24 24"><path d="M9 4h6v3H9z"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="m8 14 2 2 4-4"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13A4 4 0 0 1 19 7a4 4 0 0 1-3 3.87"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-wallet" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6z"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></symbol>
+    <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></symbol>
+  </svg>
 
-  <main>
-    <section id="view-login" hidden>
-      <form id="loginForm" class="panel form">
-        <h2>تسجيل الدخول</h2>
-        <label>اسم المستخدم
-          <input id="loginUser" dir="ltr" autocomplete="username" autocapitalize="none" required>
-        </label>
-        <label>كلمة المرور
-          <input id="loginPass" type="password" dir="ltr" autocomplete="current-password" required>
-        </label>
-        <p id="loginError" class="form-error" role="alert" hidden></p>
-        <div class="actions">
-          <button type="submit" id="loginSubmit">دخول</button>
-          <button type="button" id="demo" class="ghost">تجربة ببيانات نموذجية</button>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark"><svg class="icon"><use href="#i-logo"></use></svg></span>
+        <span class="brand-text">
+          <strong>موقف الفواتير</strong>
+          <small>لوحة التحكم المالية</small>
+        </span>
+      </div>
+
+      <nav id="tabs" class="nav tabs" aria-label="الشاشات" hidden>
+        <p class="nav-label">الرئيسية</p>
+        <button type="button" data-view="invoices" aria-current="page">
+          <svg class="icon"><use href="#i-invoices"></use></svg><span>الفواتير</span>
+        </button>
+        <button type="button" data-view="check">
+          <svg class="icon"><use href="#i-check"></use></svg><span>فحص فاتورة جديدة</span>
+        </button>
+
+        <p class="nav-label">الإدارة</p>
+        <button type="button" data-view="requests">
+          <svg class="icon"><use href="#i-requests"></use></svg><span>الطلبات والاعتمادات</span>
+        </button>
+        <button type="button" data-view="users" data-admin hidden>
+          <svg class="icon"><use href="#i-users"></use></svg><span>المستخدمون</span>
+        </button>
+        <button type="button" data-view="settings">
+          <svg class="icon"><use href="#i-settings"></use></svg><span>الإعدادات</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div id="session" class="user-card" hidden>
+          <span id="userAvatar" class="avatar" aria-hidden="true">؟</span>
+          <span class="user-meta">
+            <small>مسجّل الدخول</small>
+            <span id="whoami"></span>
+          </span>
+          <button type="button" id="logout" class="icon-btn on-dark" title="تسجيل الخروج" aria-label="تسجيل الخروج">
+            <svg class="icon"><use href="#i-logout"></use></svg>
+          </button>
         </div>
-      </form>
-    </section>
-
-    <section id="view-invoices" hidden>
-      <div id="kpis" class="kpis"></div>
-      <div id="aging" class="aging" role="group" aria-label="أعمار الفواتير المفتوحة"></div>
-      <div class="filters">
-        <label>بحث
-          <input id="q" type="search" placeholder="رقم الفاتورة أو العميل أو الكود">
-        </label>
-        <label>الموقف
-          <select id="verdict">
-            <option value="open">كل المفتوحة</option>
-            <option value="stop">حرجة</option>
-            <option value="warn">تحتاج متابعة</option>
-            <option value="ok">منتظمة</option>
-            <option value="paid">مسددة</option>
-            <option value="all">كل الفواتير</option>
-          </select>
-        </label>
-        <label>المندوب
-          <select id="rep"></select>
-        </label>
-        <button type="button" id="export" class="ghost">تصدير CSV</button>
+        <p class="sidebar-note">البيانات تُقرأ من الشيت مباشرة ولا تُحفظ على الجهاز.</p>
       </div>
-      <p id="count" class="muted" aria-live="polite"></p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>الفاتورة</th><th>العميل</th><th>التاريخ</th><th class="n">القيمة</th><th class="n">المتبقي</th>
-              <th>الاستحقاق</th><th>الائتمان</th><th>الضمان</th><th>المتأخرات</th><th>الموقف</th>
-            </tr>
-          </thead>
-          <tbody id="rows"></tbody>
-        </table>
-      </div>
-      <button type="button" id="more" class="ghost more" hidden>عرض المزيد</button>
-    </section>
+    </aside>
 
-    <section id="view-check" hidden>
-      <form id="checkForm" class="panel form">
-        <h2>هل يمكن إصدار الفاتورة؟</h2>
-        <label>العميل
-          <input id="checkCustomer" list="customerList" placeholder="اكتب الاسم أو الكود" autocomplete="off" required>
-          <datalist id="customerList"></datalist>
-        </label>
-        <label>قيمة الفاتورة
-          <input id="checkAmount" type="number" min="0.01" step="any" inputmode="decimal" dir="ltr" required>
-        </label>
-        <button type="submit">افحص</button>
-      </form>
-      <div id="checkResult"></div>
-    </section>
-
-    <section id="view-requests" hidden>
-      <div class="filters">
-        <label>موقف الاعتماد
-          <select id="requestStatus">
-            <option value="قيد الاعتماد">قيد الاعتماد</option>
-            <option value="معتمد">معتمد</option>
-            <option value="مرفوض">مرفوض</option>
-            <option value="لا يحتاج اعتماد">لا يحتاج اعتماد</option>
-            <option value="">الكل</option>
-          </select>
-        </label>
-        <button type="button" id="requestsReload" class="ghost">تحديث الطلبات</button>
-      </div>
-      <p id="requestsCount" class="muted" aria-live="polite"></p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>الطلب</th><th>العميل</th><th class="n">القيمة</th><th>الفحص</th><th>مقدم الطلب</th>
-              <th>الاعتماد</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="requestRows"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="view-users" hidden>
-      <form id="userForm" class="panel form">
-        <h2>إضافة مستخدم أو تعديله</h2>
-        <label>اسم المستخدم
-          <input id="userUsername" dir="ltr" autocomplete="off" autocapitalize="none" required>
-        </label>
-        <label>الاسم
-          <input id="userName" autocomplete="off" required>
-        </label>
-        <label>الصلاحية
-          <select id="userRole">
-            <option value="موظف">موظف: يفحص ويسجل الطلبات</option>
-            <option value="معتمد">معتمد: يعتمد الطلبات أيضًا</option>
-            <option value="مدير">مدير: كل الصلاحيات والمستخدمون والقواعد</option>
-          </select>
-        </label>
-        <label>المخازن
-          <input id="userWarehouses" placeholder="فارغ يعني كل المخازن. مثال: 65، 70" autocomplete="off">
-        </label>
-        <label class="check">
-          <input id="userActive" type="checkbox" checked> الحساب مفعّل
-        </label>
-        <label>كلمة المرور
-          <input id="userPassword" type="password" dir="ltr" autocomplete="new-password" placeholder="اتركها فارغة للإبقاء على الحالية">
-        </label>
-        <p id="userError" class="form-error" role="alert" hidden></p>
-        <div class="actions">
-          <button type="submit" id="userSubmit">حفظ</button>
-          <button type="button" id="userClear" class="ghost">مستخدم جديد</button>
+    <div class="main">
+      <header class="topbar">
+        <button type="button" id="menuToggle" class="icon-btn only-mobile" aria-label="فتح القائمة" aria-controls="sidebar" aria-expanded="false">
+          <svg class="icon"><use href="#i-menu"></use></svg>
+        </button>
+        <div class="page-heading">
+          <h1 id="pageTitle">لوحة التحكم</h1>
+          <p id="pageSubtitle" class="muted">نظرة شاملة على موقف الفواتير</p>
         </div>
-      </form>
-      <div class="table-wrap users-table">
-        <table>
-          <thead><tr><th>اسم المستخدم</th><th>الاسم</th><th>الصلاحية</th><th>المخازن</th><th>الحالة</th><th></th></tr></thead>
-          <tbody id="userRows"></tbody>
-        </table>
-      </div>
-    </section>
+        <div class="topbar-actions">
+          <span class="stamp">
+            <svg class="icon"><use href="#i-clock"></use></svg>
+            <span id="stamp">الائتمان والضمان والمتأخرات</span>
+          </span>
+          <button type="button" id="reload" class="btn ghost" aria-label="تحديث البيانات" title="تحديث البيانات">
+            <svg class="icon"><use href="#i-refresh"></use></svg><span>تحديث البيانات</span>
+          </button>
+          <button type="button" id="themeToggle" class="icon-btn" title="تبديل المظهر" aria-label="تبديل المظهر">
+            <svg class="icon"><use href="#i-moon"></use></svg>
+          </button>
+        </div>
+      </header>
 
-    <section id="view-settings" hidden>
-      <form id="passwordForm" class="panel form">
-        <h2>تغيير كلمة المرور</h2>
-        <label>كلمة المرور الحالية
-          <input id="oldPassword" type="password" dir="ltr" autocomplete="current-password" required>
-        </label>
-        <label>كلمة المرور الجديدة
-          <input id="newPassword" type="password" dir="ltr" autocomplete="new-password" minlength="8" required>
-        </label>
-        <p id="passwordMsg" role="alert"></p>
-        <button type="submit">تغيير</button>
-      </form>
-      <form id="rulesForm" class="panel form rules-form" data-admin hidden>
-        <h2>قواعد التحليل</h2>
-        <label>فاتورة جديدة تتجاوز حد الائتمان
-          <select id="overLimit">
-            <option value="stop">موقوفة</option>
-            <option value="warn">تحتاج موافقة</option>
-          </select>
-        </label>
-        <label>المتأخرات تصبح حرجة بعد (يوم)
-          <input id="stopDays" type="number" min="0" step="1" dir="ltr" required>
-        </label>
-        <label>تجاهل المتأخرات الأقل من (مبلغ)
-          <input id="tolerance" type="number" min="0" step="any" dir="ltr" required>
-        </label>
-        <p class="muted">تسري القواعد على كل المستخدمين، والخادم يستخدمها عند تسجيل الطلبات واعتمادها.</p>
-        <p id="rulesMsg" role="alert"></p>
-        <button type="submit">حفظ القواعد</button>
-      </form>
-    </section>
-  </main>
+      <div id="banner" class="banner" hidden></div>
+
+      <main class="content">
+        <section id="view-login" hidden>
+          <div class="login-view">
+            <div class="login-card">
+              <div class="login-intro">
+                <span class="brand-mark large"><svg class="icon"><use href="#i-logo"></use></svg></span>
+                <h2>موقف الفواتير</h2>
+                <p>منصة واحدة لمتابعة الائتمان والضمان والمتأخرات، وفحص كل فاتورة قبل إصدارها.</p>
+                <ul class="feature-list">
+                  <li><svg class="icon"><use href="#i-check-circle"></use></svg> تحليل فوري لموقف كل عميل وفاتورة</li>
+                  <li><svg class="icon"><use href="#i-check-circle"></use></svg> قواعد واضحة للاعتماد والرفض</li>
+                  <li><svg class="icon"><use href="#i-check-circle"></use></svg> صلاحيات ونطاق مخازن لكل مستخدم</li>
+                </ul>
+                <p class="login-foot">الائتمان · الضمان · المتأخرات · الشيكات</p>
+              </div>
+
+              <form id="loginForm" class="panel form login-form">
+                <h2>تسجيل الدخول</h2>
+                <p class="muted">أدخل بيانات حسابك للوصول إلى لوحة التحكم.</p>
+                <label>اسم المستخدم
+                  <input id="loginUser" dir="ltr" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus required>
+                </label>
+                <label>كلمة المرور
+                  <input id="loginPass" type="password" dir="ltr" autocomplete="current-password" required>
+                </label>
+                <p id="loginError" class="form-error" role="alert" hidden></p>
+                <div class="actions">
+                  <button type="submit" id="loginSubmit" class="btn">دخول</button>
+                  <button type="button" id="demo" class="btn ghost">تجربة ببيانات نموذجية</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-invoices" hidden>
+          <div id="kpis" class="kpis"></div>
+
+          <div class="charts">
+            <section class="card chart-card" aria-labelledby="agingTitle">
+              <div class="card-head">
+                <div>
+                  <h2 id="agingTitle">أعمار المديونية المفتوحة</h2>
+                  <p class="muted">اضغط على أي شريحة لتصفية الفواتير</p>
+                </div>
+              </div>
+              <div id="aging" class="aging" role="group" aria-label="أعمار الفواتير المفتوحة"></div>
+            </section>
+
+            <section class="card chart-card" aria-labelledby="statusTitle">
+              <div class="card-head">
+                <div>
+                  <h2 id="statusTitle">توزيع الفواتير</h2>
+                  <p class="muted">حسب الموقف النهائي</p>
+                </div>
+              </div>
+              <div id="statusChart" class="status-chart"></div>
+            </section>
+          </div>
+
+          <section class="card table-card">
+            <div class="card-head">
+              <div>
+                <h2>قائمة الفواتير</h2>
+                <p id="count" class="muted" aria-live="polite"></p>
+              </div>
+              <button type="button" id="export" class="btn ghost">
+                <svg class="icon"><use href="#i-download"></use></svg><span>تصدير CSV</span>
+              </button>
+            </div>
+
+            <div class="filters">
+              <label class="field grow">بحث
+                <span class="input-wrap">
+                  <svg class="icon"><use href="#i-search"></use></svg>
+                  <input id="q" type="search" placeholder="رقم الفاتورة أو العميل أو الكود">
+                </span>
+              </label>
+              <label class="field">الموقف
+                <select id="verdict">
+                  <option value="open">كل المفتوحة</option>
+                  <option value="stop">حرجة</option>
+                  <option value="warn">تحتاج متابعة</option>
+                  <option value="ok">منتظمة</option>
+                  <option value="paid">مسددة</option>
+                  <option value="all">كل الفواتير</option>
+                </select>
+              </label>
+              <label class="field">المندوب
+                <select id="rep"></select>
+              </label>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>الفاتورة</th><th>العميل</th><th>التاريخ</th><th class="n">القيمة</th><th class="n">المتبقي</th>
+                    <th>الاستحقاق</th><th>الائتمان</th><th>الضمان</th><th>المتأخرات</th><th>الموقف</th>
+                  </tr>
+                </thead>
+                <tbody id="rows"></tbody>
+              </table>
+            </div>
+            <button type="button" id="more" class="btn ghost more" hidden>عرض المزيد</button>
+          </section>
+        </section>
+
+        <section id="view-check" hidden>
+          <div class="check-layout">
+            <form id="checkForm" class="panel form">
+              <h2>هل يمكن إصدار الفاتورة؟</h2>
+              <p class="muted">اختر العميل وأدخل قيمة الفاتورة، وسيظهر القرار مع أسباب واضحة.</p>
+              <label>العميل
+                <input id="checkCustomer" list="customerList" placeholder="اكتب الاسم أو الكود" autocomplete="off" required>
+                <datalist id="customerList"></datalist>
+              </label>
+              <label>قيمة الفاتورة
+                <input id="checkAmount" type="number" min="0.01" step="any" inputmode="decimal" dir="ltr" required>
+              </label>
+              <button type="submit" class="btn">
+                <svg class="icon"><use href="#i-check"></use></svg><span>افحص الفاتورة</span>
+              </button>
+            </form>
+            <div id="checkResult"></div>
+          </div>
+        </section>
+
+        <section id="view-requests" hidden>
+          <section class="card table-card">
+            <div class="card-head">
+              <div>
+                <h2>طلبات الفواتير</h2>
+                <p id="requestsCount" class="muted" aria-live="polite"></p>
+              </div>
+              <div class="actions">
+                <label class="field compact">موقف الاعتماد
+                  <select id="requestStatus">
+                    <option value="قيد الاعتماد">قيد الاعتماد</option>
+                    <option value="معتمد">معتمد</option>
+                    <option value="مرفوض">مرفوض</option>
+                    <option value="لا يحتاج اعتماد">لا يحتاج اعتماد</option>
+                    <option value="">الكل</option>
+                  </select>
+                </label>
+                <button type="button" id="requestsReload" class="btn ghost">
+                  <svg class="icon"><use href="#i-refresh"></use></svg><span>تحديث</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>الطلب</th><th>العميل</th><th class="n">القيمة</th><th>الفحص</th><th>مقدم الطلب</th>
+                    <th>الاعتماد</th><th></th>
+                  </tr>
+                </thead>
+                <tbody id="requestRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-users" hidden>
+          <div class="grid-2">
+            <form id="userForm" class="panel form">
+              <h2>إضافة مستخدم أو تعديله</h2>
+              <label>اسم المستخدم
+                <input id="userUsername" dir="ltr" autocomplete="off" autocapitalize="none" required>
+              </label>
+              <label>الاسم
+                <input id="userName" autocomplete="off" required>
+              </label>
+              <label>الصلاحية
+                <select id="userRole">
+                  <option value="موظف">موظف: يفحص ويسجل الطلبات</option>
+                  <option value="معتمد">معتمد: يعتمد الطلبات أيضًا</option>
+                  <option value="مدير">مدير: كل الصلاحيات والمستخدمون والقواعد</option>
+                </select>
+              </label>
+              <label>المخازن
+                <input id="userWarehouses" placeholder="فارغ يعني كل المخازن. مثال: 65، 70" autocomplete="off">
+              </label>
+              <label class="check">
+                <input id="userActive" type="checkbox" checked> الحساب مفعّل
+              </label>
+              <label>كلمة المرور
+                <input id="userPassword" type="password" dir="ltr" autocomplete="new-password" placeholder="اتركها فارغة للإبقاء على الحالية">
+              </label>
+              <p id="userError" class="form-error" role="alert" hidden></p>
+              <div class="actions">
+                <button type="submit" id="userSubmit" class="btn">حفظ</button>
+                <button type="button" id="userClear" class="btn ghost">مستخدم جديد</button>
+              </div>
+            </form>
+
+            <section class="card table-card users-table">
+              <div class="card-head">
+                <div>
+                  <h2>المستخدمون</h2>
+                  <p class="muted">الصلاحيات ونطاق المخازن</p>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>اسم المستخدم</th><th>الاسم</th><th>الصلاحية</th><th>المخازن</th><th>الحالة</th><th></th></tr></thead>
+                  <tbody id="userRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-settings" hidden>
+          <div class="grid-2">
+            <form id="passwordForm" class="panel form">
+              <h2>تغيير كلمة المرور</h2>
+              <p class="muted">استخدم كلمة مرور قوية لا تقل عن 8 أحرف.</p>
+              <label>كلمة المرور الحالية
+                <input id="oldPassword" type="password" dir="ltr" autocomplete="current-password" required>
+              </label>
+              <label>كلمة المرور الجديدة
+                <input id="newPassword" type="password" dir="ltr" autocomplete="new-password" minlength="8" required>
+              </label>
+              <p id="passwordMsg" role="alert"></p>
+              <button type="submit" class="btn">تغيير كلمة المرور</button>
+            </form>
+
+            <form id="rulesForm" class="panel form rules-form" data-admin hidden>
+              <h2>قواعد التحليل</h2>
+              <label>فاتورة جديدة تتجاوز حد الائتمان
+                <select id="overLimit">
+                  <option value="stop">موقوفة</option>
+                  <option value="warn">تحتاج موافقة</option>
+                </select>
+              </label>
+              <label>المتأخرات تصبح حرجة بعد (يوم)
+                <input id="stopDays" type="number" min="0" step="1" dir="ltr" required>
+              </label>
+              <label>تجاهل المتأخرات الأقل من (مبلغ)
+                <input id="tolerance" type="number" min="0" step="any" dir="ltr" required>
+              </label>
+              <p class="muted">تسري القواعد على كل المستخدمين، والخادم يستخدمها عند تسجيل الطلبات واعتمادها.</p>
+              <p id="rulesMsg" role="alert"></p>
+              <button type="submit" class="btn">حفظ القواعد</button>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
 
   <dialog id="detail" aria-labelledby="detailTitle">
     <div id="detailBody"></div>
-    <form method="dialog"><button class="ghost">إغلاق</button></form>
+    <form method="dialog"><button class="btn ghost">إغلاق</button></form>
   </dialog>
 
   <dialog id="decision" aria-labelledby="decisionTitle">
     <h2 id="decisionTitle"></h2>
     <p id="decisionInfo" class="muted"></p>
     <div id="decisionCurrent" class="note-box" aria-live="polite"></div>
+    <p id="decisionBusy" class="busy" role="status" hidden>
+      <span class="spinner" aria-hidden="true"></span><span id="decisionBusyText"></span>
+    </p>
     <label>ملاحظات الاعتماد
       <textarea id="decisionNote" rows="3"></textarea>
     </label>
     <p id="decisionError" class="form-error" role="alert" hidden></p>
     <div class="actions">
-      <button type="button" id="approve">اعتماد</button>
-      <button type="button" id="reject" class="danger">رفض</button>
-      <button type="button" id="decisionClose" class="ghost">إلغاء</button>
+      <button type="button" id="approve" class="btn">اعتماد</button>
+      <button type="button" id="reject" class="btn danger">رفض</button>
+      <button type="button" id="decisionRetry" class="btn ghost" hidden>إعادة المحاولة</button>
+      <button type="button" id="decisionClose" class="btn ghost">إلغاء</button>
     </div>
   </dialog>
 
-  <script src="engine.js?v=6"></script>
-  <script src="demo.js?v=6"></script>
-  <script src="app.js?v=6"></script>
+  <script src="engine.js?v=8"></script>
+  <script src="demo.js?v=8"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

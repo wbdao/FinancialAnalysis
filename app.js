@@ -22,6 +22,15 @@
   };
   const ROLE_ADMIN = 'مدير';
   const ROLE_APPROVER = 'معتمد';
+  const THEME_KEY = 'financialAnalysis.theme';
+  const VIEW_META = {
+    login: ['تسجيل الدخول', 'الوصول إلى لوحة التحكم'],
+    invoices: ['لوحة التحكم', 'نظرة شاملة على الائتمان والضمان والمتأخرات'],
+    check: ['فحص فاتورة جديدة', 'قرار سريع قبل إصدار الفاتورة'],
+    requests: ['الطلبات والاعتمادات', 'متابعة الطلبات وقرارات الاعتماد'],
+    users: ['المستخدمون', 'إدارة الحسابات والصلاحيات ونطاق المخازن'],
+    settings: ['الإعدادات', 'كلمة المرور وقواعد التحليل'],
+  };
 
   const $ = (id) => document.getElementById(id);
   const money = (v) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(v);
@@ -31,6 +40,7 @@
   const state = {
     token: readToken(), user: null, sheets: null, rules: Engine.DEFAULT_RULES, isDemo: false, result: null,
     shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
+    decisionPending: false,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -89,12 +99,14 @@
     state.user = user;
     const scope = user.warehouses && user.warehouses.length ? user.warehouses.join('، ') : 'كل المخازن';
     $('whoami').textContent = `${user.name} · ${user.role} · ${scope}`;
+    $('userAvatar').textContent = (user.name || user.username || '؟').trim().charAt(0);
     document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = !isAdmin(); });
   }
 
   function clearData() {
     Object.assign(state, { user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null, isDemo: false });
-    for (const id of ['rows', 'kpis', 'aging', 'requestRows', 'userRows', 'checkResult', 'customerList']) $(id).innerHTML = '';
+    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList']) $(id).innerHTML = '';
+    $('userAvatar').textContent = '؟';
     document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = true; });
     $('stamp').textContent = 'الائتمان والضمان والمتأخرات';
   }
@@ -126,6 +138,7 @@
       saveToken(data.token);
       $('loginPass').value = '';
       signedIn();
+      show('invoices');
       await loadData();
     } catch (e) {
       $('loginError').textContent = e.message;
@@ -170,7 +183,7 @@
     const { base, tx, analysisDay, checks } = state.sheets;
     state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
-    $('stamp').textContent = `${state.isDemo ? 'بيانات نموذجية · ' : ''}المتأخرات محسوبة حتى ${dateOf(state.result.analysisDay)} (آخر حركة في الشيت)`;
+    $('stamp').textContent = `المتأخرات حتى ${dateOf(state.result.analysisDay)}`;
     const demoNote = state.isDemo ? 'هذه بيانات نموذجية للتجربة وليست بيانات حقيقية. ' : '';
     banner((demoNote + issuesText(state.result.issues)).trim());
     fillRepFilter();
@@ -206,6 +219,7 @@
     state.rules = Engine.DEFAULT_RULES;
     state.user = null;
     $('whoami').textContent = 'وضع التجربة';
+    $('userAvatar').textContent = 'ت';
     $('loginError').hidden = true;
     signedIn();
     recompute();
@@ -220,6 +234,52 @@
       if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
     });
+    document.body.dataset.view = view;
+    const meta = VIEW_META[view];
+    if (meta) {
+      $('pageTitle').textContent = meta[0];
+      $('pageSubtitle').textContent = meta[1];
+      document.title = `${meta[0]} · موقف الفواتير`;
+    }
+    document.body.classList.remove('nav-open');
+    $('menuToggle').setAttribute('aria-expanded', 'false');
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+  }
+
+  function closeNav() {
+    document.body.classList.remove('nav-open');
+    $('menuToggle').setAttribute('aria-expanded', 'false');
+  }
+
+  function applyTheme(theme, persist) {
+    const root = document.documentElement;
+    if (theme) root.dataset.theme = theme;
+    else delete root.dataset.theme;
+    if (persist) {
+      try {
+        if (theme) localStorage.setItem(THEME_KEY, theme);
+        else localStorage.removeItem(THEME_KEY);
+      } catch (e) {
+        console.warn('theme not saved', e);
+      }
+    }
+    const dark = theme ? theme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const btn = $('themeToggle');
+    btn.innerHTML = `<svg class="icon"><use href="#i-${dark ? 'sun' : 'moon'}"></use></svg>`;
+    const label = dark ? 'التبديل إلى المظهر الفاتح' : 'التبديل إلى المظهر الداكن';
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+  }
+
+  function initTheme() {
+    let saved = '';
+    try {
+      saved = localStorage.getItem(THEME_KEY) || '';
+    } catch (e) {
+      saved = '';
+    }
+    applyTheme(saved === 'dark' || saved === 'light' ? saved : null, false);
   }
 
   /* ---- invoices screen ------------------------------------------------------ */
@@ -231,21 +291,75 @@
     if (reps.includes(current)) $('rep').value = current;
   }
 
+  function kpiCard(icon, tone, label, value, sub) {
+    return `<article class="kpi kpi-${tone}">
+      <div class="kpi-top">
+        <span class="kpi-icon"><svg class="icon"><use href="#i-${icon}"></use></svg></span>
+        <span class="kpi-label">${esc(label)}</span>
+      </div>
+      <strong class="kpi-value">${esc(value)}</strong>
+      <span class="kpi-sub">${esc(sub)}</span>
+    </article>`;
+  }
+
+  function renderAgingChart(s) {
+    const max = Math.max(1, ...s.aging);
+    $('aging').innerHTML = Engine.AGING_BUCKETS.map((label, i) => {
+      const height = Math.max(5, Math.round((s.aging[i] / max) * 100));
+      return `<button type="button" class="bar-col" data-bucket="${i}" aria-pressed="${state.bucket === i}" title="${esc(label)}: ${money(s.aging[i])}">
+        <span class="bar-value">${money(s.aging[i])}</span>
+        <span class="bar-track"><span class="bar bar-${i}" style="height:${height}%"></span></span>
+        <span class="bar-label">${esc(label)}</span>
+      </button>`;
+    }).join('');
+  }
+
+  function renderStatusChart(s) {
+    const order = [
+      ['stop', 'حرجة', 'var(--c-stop)'],
+      ['warn', 'تحتاج متابعة', 'var(--c-warn)'],
+      ['ok', 'منتظمة', 'var(--c-ok)'],
+      ['paid', 'مسددة', 'var(--c-paid)'],
+    ];
+    const total = order.reduce((n, [key]) => n + s.byVerdict[key].count, 0);
+    let acc = 0;
+    const stops = [];
+    for (const [key] of order) {
+      const count = s.byVerdict[key].count;
+      if (!count || !total) continue;
+      const to = acc + (count / total) * 100;
+      stops.push(`var(--c-${key}) ${acc.toFixed(2)}% ${to.toFixed(2)}%`);
+      acc = to;
+    }
+    const gradient = stops.length
+      ? `conic-gradient(from -90deg, ${stops.join(', ')})`
+      : 'conic-gradient(var(--line), var(--line))';
+    const legend = order.map(([key, label, color]) => `
+      <li><span class="dot" style="--dc:${color}"></span>${esc(label)}<b>${money(s.byVerdict[key].count)}</b></li>`).join('');
+    $('statusChart').innerHTML = `
+      <div class="donut" style="background:${gradient}">
+        <div class="donut-hole">
+          <span>${money(total)} فاتورة</span>
+          <strong>${money(s.openAmount)}</strong>
+          <small>متبقٍ مفتوح</small>
+        </div>
+      </div>
+      <ul class="legend">${legend}</ul>`;
+  }
+
   function renderKpis() {
     const s = state.result.summary;
-    const kpi = (label, value, sub) => `<div class="kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(sub)}</small></div>`;
+    const pct = (v) => (s.openAmount ? `${Math.round((v / s.openAmount) * 100)}% من المفتوح` : '—');
     $('kpis').innerHTML = [
-      kpi('الفواتير المفتوحة', money(s.openAmount), `${money(s.open)} فاتورة من ${money(s.invoices)}`),
-      kpi('المتأخرات', money(s.overdueAmount), s.openAmount ? `${Math.round((s.overdueAmount / s.openAmount) * 100)}% من المفتوح` : '—'),
-      kpi('غير مغطى بالضمان', money(s.uncoveredAmount), s.openAmount ? `${Math.round((s.uncoveredAmount / s.openAmount) * 100)}% من المفتوح` : '—'),
-      kpi('تجاوز حد الائتمان', money(s.overLimitAmount), `${money(s.overLimitCustomers)} عميل`),
-      kpi('فواتير حرجة', money(s.byVerdict.stop.count), `متبقٍ ${money(s.byVerdict.stop.amount)}`),
-      s.hasChecks ? kpi('شيكات مفتوحة', money(s.checksOpen), `مستحقة لم تُصرف ${money(s.checksDueCount)} · مرفوضة ${money(s.checksRejectedCount)}`) : '',
+      kpiCard('wallet', 'primary', 'الفواتير المفتوحة', money(s.openAmount), `${money(s.open)} فاتورة من ${money(s.invoices)}`),
+      kpiCard('clock', 'warn', 'المتأخرات', money(s.overdueAmount), pct(s.overdueAmount)),
+      kpiCard('shield', 'warn', 'غير مغطى بالضمان', money(s.uncoveredAmount), pct(s.uncoveredAmount)),
+      kpiCard('alert', 'stop', 'تجاوز حد الائتمان', money(s.overLimitAmount), `${money(s.overLimitCustomers)} عميل`),
+      kpiCard('ban', 'stop', 'فواتير حرجة', money(s.byVerdict.stop.count), `متبقٍ ${money(s.byVerdict.stop.amount)}`),
+      s.hasChecks ? kpiCard('check-circle', 'info', 'شيكات مفتوحة', money(s.checksOpen), `مستحقة ${money(s.checksDueCount)} · مرفوضة ${money(s.checksRejectedCount)}`) : '',
     ].join('');
-    $('aging').innerHTML = Engine.AGING_BUCKETS.map((label, i) => `
-      <button type="button" data-bucket="${i}" aria-pressed="${state.bucket === i}">
-        <span>${esc(label)}</span><b>${money(s.aging[i])}</b>
-      </button>`).join('');
+    renderAgingChart(s);
+    renderStatusChart(s);
   }
 
   function matchingInvoices() {
@@ -479,7 +593,7 @@
     const list = state.requests.filter((r) => !status || r.status === status).reverse();
     const pending = state.requests.filter((r) => r.status === 'قيد الاعتماد');
     const pendingTotal = pending.reduce((s, r) => s + Number(r.amount), 0);
-    $('requestsCount').textContent = `${money(list.length)} طلب · قيد الاعتماد ${money(pending.length)} بقيمة ${money(pendingTotal)}`;
+    $('requestsCount').innerHTML = `<span class="chip">${money(list.length)} طلب</span><span class="chip warn">قيد الاعتماد ${money(pending.length)} · ${money(pendingTotal)}</span>`;
     if (!list.length) {
       $('requestRows').innerHTML = '<tr><td colspan="7" class="empty">لا توجد طلبات مطابقة.</td></tr>';
       return;
@@ -500,40 +614,100 @@
       </tr>`).join('');
   }
 
+  const VERDICT_LABEL = { ok: 'سليمة', warn: 'تحتاج موافقة', stop: 'موقوفة' };
+
+  // The dialog answers instantly from the data already on screen. The script
+  // still recomputes the check before any decision is accepted.
+  function previewCheck(r) {
+    if (!state.result || !state.result.customers) return null;
+    const account = String(r.account).trim();
+    const c = state.result.customers.find((x) => String(x.account).trim() === account);
+    if (!c) return null;
+    const res = Engine.evaluateNew(c, Number(r.amount), state.rules);
+    const reasons = Object.keys(res.checks)
+      .filter((k) => res.checks[k].level !== 'ok')
+      .map((k) => res.checks[k].label).join('، ');
+    return {
+      verdict: res.verdict, verdictLabel: VERDICT_LABEL[res.verdict] || res.verdict,
+      exposureAfter: res.exposureAfter, creditLimit: c.creditLimit, guarantee: c.guarantee,
+      overdue: c.overdue, checksRejected: c.checksRejected, reasons,
+    };
+  }
+
+  function checkHtml(check, label) {
+    return `
+      <b>${label}:</b><span class="tag ${check.verdict}">${esc(check.verdictLabel)}</span>
+      <span class="sub">الرصيد شامل الشيكات بعد الفاتورة ${money(check.exposureAfter)} من حد ${money(check.creditLimit)} · الضمان ${money(check.guarantee)} · المتأخرات ${money(check.overdue)} · شيكات مرفوضة ${money(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
+  }
+
+  function setBusy(text) {
+    $('decisionBusyText').textContent = text || '';
+    $('decisionBusy').hidden = !text;
+  }
+
   async function openDecision(id) {
     const r = state.requests.find((x) => x.id === id);
     if (!r) return;
     state.deciding = r;
+    state.decisionPending = false;
     $('decisionTitle').textContent = `قرار الطلب ${r.id}`;
     $('decisionInfo').textContent = `${r.customer} · ${money(r.amount)} · عند التسجيل: ${r.verdict}`;
-    $('decisionCurrent').textContent = 'جارٍ فحص الطلب بالبيانات الحالية…';
     $('decisionNote').value = '';
     $('decisionError').hidden = true;
+    $('decisionRetry').hidden = true;
     $('approve').disabled = $('reject').disabled = true;
+    const preview = previewCheck(r);
+    $('decisionCurrent').innerHTML = preview
+      ? checkHtml(preview, 'الموقف المتوقع')
+      : '<span class="sub">جارٍ جلب بيانات الطلب…</span>';
+    // The preview is enough to start a decision: the script recomputes the
+    // request before writing it, and the refresh below only adds live detail.
+    if (preview) $('approve').disabled = $('reject').disabled = false;
+    setBusy('جارٍ التحقق من الطلب بالبيانات الحالية…');
     $('decision').showModal();
+    await loadDecisionCheck(r);
+  }
+
+  async function loadDecisionCheck(r) {
+    if (state.deciding !== r) return;
+    $('decisionError').hidden = true;
+    $('decisionRetry').hidden = true;
+    if (!state.decisionPending) $('approve').disabled = $('reject').disabled = true;
+    setBusy('جارٍ التحقق من الطلب بالبيانات الحالية…');
     try {
-      const { check } = await callScript('recheck', { id });
-      if (state.deciding !== r) return;
-      $('decisionCurrent').innerHTML = `
-        <b>الموقف الآن:</b><span class="tag ${check.verdict}">${esc(check.verdictLabel)}</span>
-        <span class="sub">الرصيد شامل الشيكات بعد الفاتورة ${money(check.exposureAfter)} من حد ${money(check.creditLimit)} · الضمان ${money(check.guarantee)} · المتأخرات ${money(check.overdue)} · شيكات مرفوضة ${money(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
+      const { check } = await callScript('recheck', { id: r.id });
+      if (state.deciding !== r || state.decisionPending) return;
+      $('decisionCurrent').innerHTML = checkHtml(check, 'الموقف الآن');
       $('approve').disabled = $('reject').disabled = false;
     } catch (e) {
-      $('decisionCurrent').textContent = '';
+      if (state.deciding !== r || state.decisionPending) return;
+      setBusy('');
       $('decisionError').textContent = e.message;
       $('decisionError').hidden = false;
+      $('decisionRetry').hidden = false;
+      return;
     }
+    if (state.deciding === r) setBusy('');
   }
 
   async function decide(decision) {
+    if (!state.deciding) return;
+    const r = state.deciding;
+    state.decisionPending = true;
     $('approve').disabled = $('reject').disabled = true;
     $('decisionError').hidden = true;
+    $('decisionRetry').hidden = true;
+    setBusy(decision === 'approve' ? 'جارٍ اعتماد الطلب…' : 'جارٍ رفض الطلب…');
     try {
-      const data = await callScript('decide', { id: state.deciding.id, decision, note: $('decisionNote').value });
-      state.requests = state.requests.map((r) => (r.id === data.request.id ? data.request : r));
+      const data = await callScript('decide', { id: r.id, decision, note: $('decisionNote').value });
+      state.requests = state.requests.map((x) => (x.id === data.request.id ? data.request : x));
+      state.decisionPending = false;
+      setBusy('');
       $('decision').close();
       renderRequests();
     } catch (e) {
+      state.decisionPending = false;
+      setBusy('');
       $('decisionError').textContent = e.message;
       $('decisionError').hidden = false;
       $('approve').disabled = $('reject').disabled = false;
@@ -686,6 +860,22 @@
     if (b.dataset.view === 'requests') loadRequests();
     if (b.dataset.view === 'users') loadUsers();
   }));
+  $('themeToggle').addEventListener('click', () => {
+    const explicit = document.documentElement.dataset.theme;
+    const dark = explicit ? explicit === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(dark ? 'light' : 'dark', true);
+  });
+  $('menuToggle').addEventListener('click', () => {
+    const open = document.body.classList.toggle('nav-open');
+    $('menuToggle').setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('click', (e) => {
+    if (!document.body.classList.contains('nav-open')) return;
+    if (!e.target.closest('.sidebar') && !e.target.closest('#menuToggle')) closeNav();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeNav();
+  });
   $('loginForm').addEventListener('submit', login);
   $('logout').addEventListener('click', logout);
   $('demo').addEventListener('click', loadDemo);
@@ -698,7 +888,9 @@
   });
   $('approve').addEventListener('click', () => decide('approve'));
   $('reject').addEventListener('click', () => decide('reject'));
+  $('decisionRetry').addEventListener('click', () => { if (state.deciding) loadDecisionCheck(state.deciding); });
   $('decisionClose').addEventListener('click', () => $('decision').close());
+  $('decision').addEventListener('close', () => { setBusy(''); state.deciding = null; state.decisionPending = false; });
   $('userForm').addEventListener('submit', saveUser);
   $('userClear').addEventListener('click', clearUserForm);
   $('userRows').addEventListener('click', (e) => {
@@ -723,6 +915,11 @@
   $('rows').addEventListener('click', (e) => openRow(e.target.closest('tr')));
   $('rows').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') openRow(e.target.closest('tr'));
+  });
+
+  initTheme();
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!document.documentElement.dataset.theme) applyTheme(null, false);
   });
 
   if (state.token) {
