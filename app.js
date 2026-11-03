@@ -23,6 +23,12 @@
   const ROLE_ADMIN = 'مدير';
   const ROLE_APPROVER = 'معتمد';
   const THEME_KEY = 'financialAnalysis.theme';
+  // The snapshot is a read cache: decisions still go to the script.
+  const CACHE_DB = 'financialAnalysis.cache';
+  const CACHE_STORE = 'snapshots';
+  const CACHE_KEY = 'latest';
+  const CACHE_VERSION = 1;
+  const CACHE_TTL = 24 * 60 * 60 * 1000;
   const VIEW_META = {
     login: ['تسجيل الدخول', 'الوصول إلى لوحة التحكم'],
     invoices: ['لوحة التحكم', 'نظرة شاملة على الائتمان والضمان والمتأخرات'],
@@ -40,7 +46,7 @@
   const state = {
     token: readToken(), user: null, sheets: null, rules: Engine.DEFAULT_RULES, isDemo: false, result: null,
     shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
-    decisionPending: false,
+    decisionPending: false, cacheSavedAt: null,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -90,6 +96,111 @@
     return data;
   }
 
+  /* ---- local snapshot (IndexedDB) ------------------------------------------- */
+
+  // The snapshot lets a reload show the last data without reading the sheets.
+  // It is tied to a hash of the session token, so another login never sees it.
+
+  let dbPromise = null;
+
+  function openCacheDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      if (!('indexedDB' in window)) { reject(new Error('IndexedDB غير متاح')); return; }
+      const req = indexedDB.open(CACHE_DB, CACHE_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (db.objectStoreNames.contains(CACHE_STORE)) db.deleteObjectStore(CACHE_STORE);
+        db.createObjectStore(CACHE_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('تعذّر فتح التخزين المحلي'));
+    });
+    return dbPromise;
+  }
+
+  function cacheRequest(mode, run) {
+    return openCacheDb().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE, mode);
+      let result;
+      const req = run(tx.objectStore(CACHE_STORE));
+      req.onsuccess = () => { result = req.result; };
+      tx.oncomplete = () => resolve(result);
+      tx.onabort = () => reject(tx.error || req.error);
+      tx.onerror = () => reject(tx.error || req.error);
+    }));
+  }
+
+  async function tokenTag() {
+    if (!state.token) return '';
+    try {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(state.token));
+      return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  async function readCache() {
+    try {
+      const tag = await tokenTag();
+      if (!tag) return null;
+      const snap = await cacheRequest('readonly', (store) => store.get(CACHE_KEY));
+      if (!snap || snap.version !== CACHE_VERSION || snap.tokenTag !== tag || !snap.user || !snap.base || !snap.tx) return null;
+      return snap;
+    } catch (e) {
+      console.warn('local cache read failed', e);
+      return null;
+    }
+  }
+
+  async function saveCache() {
+    if (state.isDemo || !state.token || !state.user || !state.sheets) return;
+    try {
+      const tag = await tokenTag();
+      if (!tag) return;
+      await cacheRequest('readwrite', (store) => store.put({
+        version: CACHE_VERSION, tokenTag: tag, savedAt: Date.now(),
+        user: state.user, rules: state.rules,
+        base: state.sheets.base, tx: state.sheets.tx, analysisDay: state.sheets.analysisDay,
+        checks: state.sheets.checks, checksError: state.sheets.checksError,
+      }, CACHE_KEY));
+    } catch (e) {
+      console.warn('local cache save failed', e);
+    }
+  }
+
+  async function clearCache() {
+    try {
+      await cacheRequest('readwrite', (store) => store.delete(CACHE_KEY));
+    } catch (e) {
+      console.warn('local cache clear failed', e);
+    }
+  }
+
+  const scopeOf = (u) => (u && Array.isArray(u.warehouses) ? u.warehouses.map(String).sort().join('|') : '');
+  const ruleKey = (r) => JSON.stringify(Object.keys(r || {}).sort().reduce((o, k) => { o[k] = r[k]; return o; }, {}));
+
+  function cacheNote() {
+    if (!state.cacheSavedAt) return '';
+    const d = new Date(state.cacheSavedAt);
+    const when = `${d.toLocaleDateString('ar-EG-u-nu-latn')} ${d.toLocaleTimeString('ar-EG-u-nu-latn', { hour: '2-digit', minute: '2-digit' })}`;
+    return `تُعرض نسخة محفوظة من البيانات بتاريخ ${when}. اضغط «تحديث البيانات» لجلب الأحدث.`;
+  }
+
+  function applyCache(snap, user) {
+    state.isDemo = false;
+    setUser(user || snap.user);
+    state.sheets = {
+      base: snap.base, tx: snap.tx, analysisDay: snap.analysisDay,
+      checks: snap.checks || null, checksError: snap.checksError || '',
+    };
+    state.rules = Object.assign({}, Engine.DEFAULT_RULES, snap.rules || {});
+    state.cacheSavedAt = snap.savedAt || 0;
+    recompute();
+    show('invoices');
+  }
+
   /* ---- session --------------------------------------------------------------- */
 
   const canDecide = () => !!state.user && (state.user.role === ROLE_ADMIN || state.user.role === ROLE_APPROVER);
@@ -104,7 +215,7 @@
   }
 
   function clearData() {
-    Object.assign(state, { user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null, isDemo: false });
+    Object.assign(state, { user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null, isDemo: false, cacheSavedAt: null });
     for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList']) $(id).innerHTML = '';
     $('userAvatar').textContent = '؟';
     document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = true; });
@@ -113,6 +224,7 @@
 
   function signedOut(message) {
     saveToken('');
+    clearCache();
     clearData();
     $('tabs').hidden = true;
     $('session').hidden = true;
@@ -185,7 +297,7 @@
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
     $('stamp').textContent = `المتأخرات حتى ${dateOf(state.result.analysisDay)}`;
     const demoNote = state.isDemo ? 'هذه بيانات نموذجية للتجربة وليست بيانات حقيقية. ' : '';
-    banner((demoNote + issuesText(state.result.issues)).trim());
+    banner([cacheNote(), (demoNote + issuesText(state.result.issues)).trim()].filter(Boolean).join(' '));
     fillRepFilter();
     fillCustomerList();
     fillRulesForm();
@@ -201,20 +313,53 @@
       const data = await callScript('data');
       state.sheets = { base: data.base, tx: data.tx, analysisDay: data.analysisDay, checks: data.checks, checksError: data.checksError };
       state.rules = data.rules;
+      state.cacheSavedAt = null;
       console.info('data read', data.stats);
       recompute();
       show('invoices');
+      await saveCache();
     } catch (e) {
       console.error(e);
-      if (state.token) banner(e.message, true);
+      if (state.token) banner([cacheNote(), e.message].filter(Boolean).join(' '), true);
     } finally {
       $('reload').disabled = false;
     }
   }
 
+  // A reload first validates the session with a fast ping, then shows the
+  // snapshot if it is still usable. The sheets are read only when needed.
+  async function boot() {
+    signedIn();
+    show('invoices');
+    banner('جارٍ التحقق من الجلسة وعرض البيانات…');
+    const cached = await readCache();
+    let ping;
+    try {
+      const data = await callScript('ping');
+      ping = { user: data.user || state.user, rules: data.rules || state.rules };
+    } catch (e) {
+      if (!state.token) return;  // the session ended; signedOut already ran
+      if (cached) {
+        applyCache(cached, null);
+        banner(`تعذّر التحقق من الجلسة: ${e.message} ${cacheNote()}`, true);
+      } else if (/تعذّر الوصول/.test(e.message)) {
+        banner(e.message, true);
+      } else {
+        await loadData();
+      }
+      return;
+    }
+    if (!cached) { await loadData(); return; }
+    if (scopeOf(cached.user) !== scopeOf(ping.user)) { await loadData(); return; }
+    if (ruleKey(cached.rules) !== ruleKey(ping.rules)) { await loadData(); return; }
+    applyCache(cached, ping.user);
+    if (Date.now() - cached.savedAt >= CACHE_TTL) await loadData();
+  }
+
   function loadDemo() {
     const { base, tx, checks } = window.demoSheets();
     state.isDemo = true;
+    state.cacheSavedAt = null;
     state.sheets = { base, tx, analysisDay: null, checks, checksError: '' };
     state.rules = Engine.DEFAULT_RULES;
     state.user = null;
@@ -923,9 +1068,7 @@
   });
 
   if (state.token) {
-    signedIn();
-    show('invoices');
-    loadData();
+    boot().catch((e) => { console.error(e); banner(e.message, true); });
   } else {
     show('login');
   }

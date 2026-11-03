@@ -4,6 +4,7 @@
  *
  * كل الطلبات POST بجسم JSON نصي: { action, token, ... } — token من login { username, password }.
  *   data       → بيانات العملاء والحركات في نطاق مخازن المستخدم
+ *   ping       → تحقق سريع من الجلسة وقواعد التحليل بدون قراءة الشيتات
  *   add        → تسجيل طلب فاتورة، والخادم هو الذي يحسب الفحص
  *   list       → طلبات نطاق المستخدم
  *   recheck    → فحص طلب بالبيانات الحالية قبل القرار
@@ -26,7 +27,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-04-a6';
+const BUILD = '2026-11-04-a7';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -115,6 +116,7 @@ function doPost(e) {
 function route_(req, who) {
   switch (req.action) {
     case 'logout': return logout_(req.token);
+    case 'ping': return { rules: rules_() };
     case 'data': return data_(who);
     case 'list': return { requests: scopedRequests_(who) };
     case 'add': return add_(req, who);

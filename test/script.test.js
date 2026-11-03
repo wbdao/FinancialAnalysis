@@ -58,7 +58,7 @@ test('the placeholder admin password refuses every request', () => {
 
 test('every action but login needs a session', () => {
   const s = setup();
-  for (const action of ['data', 'list', 'add', 'users', 'decide']) {
+  for (const action of ['data', 'ping', 'list', 'add', 'users', 'decide']) {
     const r = s.post({ action, token: 'made-up' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.login, true);
@@ -194,6 +194,17 @@ test('rules saved by the admin decide the server check', () => {
   assert.strictEqual(s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request.verdict, 'تحتاج موافقة');
   assert.strictEqual(s.call(s.admin, 'data').rules.stopDays, 1000);
   assert.strictEqual(s.call(s.admin, 'setRules', { overLimit: 'x', stopDays: 1, tolerance: 1 }).ok, false);
+});
+
+test('ping: a fast session check that carries the current rules', () => {
+  const s = setup();
+  const t = s.addUser('nour', 'معتمد', ['70']);
+  const r = s.call(t, 'ping');
+  assert.ok(r.ok, r.error);
+  assert.strictEqual(r.user.role, 'معتمد');
+  assert.deepStrictEqual(r.rules, s.call(s.admin, 'data').rules);
+  assert.strictEqual(r.base, undefined);
+  assert.strictEqual(r.tx, undefined);
 });
 
 test('decide: role, own requests, scope, single decision and a current check', () => {
