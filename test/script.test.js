@@ -29,8 +29,8 @@ const source = () => ({
   ],
 });
 
-function setup() {
-  const s = loadScript({ source: source() });
+function setup(extra = {}) {
+  const s = loadScript(Object.assign({ source: source() }, extra));
   s.admin = s.post({ action: 'login', username: 'admin', password: PASS }).token;
   s.call = (token, action, extra) => s.post(Object.assign({ action, token }, extra));
   s.addUser = (username, role, warehouses = []) => {
@@ -287,6 +287,83 @@ test('source tabs are found despite spaces and spelling, or the real names are l
   rename(twoLike, 'قاعده عملاء الشركه', 'قاعدة 1');
   twoLike.sourceBook.insertSheet('قاعدة 2');
   assert.match(dataOf(twoLike).error, /التبويبات الموجودة/);
+});
+
+// The main checks tab has a totals row above its header, as in the real sheet.
+const checksSheet = () => ({
+  main: [
+    ['', 'الإجمالي', '', 2500],
+    ['NN', 'كود العميل', 'رقم الشيك', 'قيمة الشيك', 'صافى الشيك', 'تاريخ الاستحقاق', 'الحاله', 'حالة الصرف', 'ملاحظة سرية'],
+    ['CH1', 'A1', '11', 2000, 2000, new Date(Date.UTC(2026, 7, 1)), 'تحت التحصيل', '', 'لا تخرج'],
+    ['CH2', 'B1', '22', 500, 500, new Date(Date.UTC(2026, 7, 1)), '', 'تم الرفض', 'لا تخرج'],
+    ['', '', '', 2500, 2500, '', '', '', ''],
+  ],
+  wh: [
+    ['WH', 'كود العميل', 'رقم الشيك', 'قيمة الشيك', 'التحصيل', 'الصافي', 'تاريخ الاستحقاق', 'mm'],
+    ['WH1', 'B1', '33', 300, 0, 300, '', 'NN'],
+  ],
+});
+const withChecks = () => setup({ checksId: 'CHECKS', checks: checksSheet() });
+
+test('checks: data carries both tabs, header found under the totals row, extra columns dropped', () => {
+  const s = withChecks();
+  const r = s.call(s.admin, 'data');
+  assert.ok(r.ok, r.error);
+  assert.strictEqual(r.checksError, '');
+  assert.ok(!JSON.stringify(r).includes('لا تخرج'));
+  assert.ok(!r.checks.main[0].includes('ملاحظة سرية'));
+  assert.strictEqual(r.checks.main[1][r.checks.main[0].indexOf('تاريخ الاستحقاق')], day(2026, 8, 1));
+  assert.strictEqual(r.stats.checks, 3);  // two main checks and one warehouse check; the totals row is not a check
+  const a = Engine.analyze(r.base, r.tx, r.rules, r.analysisDay, r.checks).customers.find((c) => c.account === 'A1');
+  assert.strictEqual(a.checksOpen, 2000);
+  assert.strictEqual(a.exposure, 7000);
+});
+
+test('checks: a warehouse user receives only the checks of their customers', () => {
+  const s = withChecks();
+  const t = s.addUser('sara', 'موظف', ['65']);
+  const r = s.call(t, 'data');
+  assert.strictEqual(r.checks.main.length, 2);
+  assert.strictEqual(r.checks.main[1][r.checks.main[0].indexOf('كود العميل')], 'A1');
+  assert.strictEqual(r.checks.wh.length, 1);
+  assert.ok(!JSON.stringify(r.checks).includes('B1'));
+});
+
+test('checks: a request is checked with them and records their figures', () => {
+  const s = withChecks();
+  const b = s.call(s.admin, 'add', { account: 'B1', amount: 100 }).request;
+  assert.strictEqual(b.verdict, 'موقوفة');
+  assert.match(b.reasons, /شيكات مرفوضة/);
+  assert.strictEqual(b.checksRejected, 500);
+  assert.strictEqual(b.checksOpen, 800);
+  const a = s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request;
+  assert.strictEqual(a.checksOpen, 2000);
+  assert.strictEqual(a.exposureAfter, 10000);
+  assert.strictEqual(a.balanceAfter, 8000);
+  const header = s.book.getSheetByName(REQUESTS).grid[0];
+  assert.ok(header.includes('شيكات مرفوضة') && header.includes('التعرض بعد الفاتورة (شامل الشيكات)'));
+});
+
+test('checks: if they cannot be read, the screens say why and requests are refused', () => {
+  const s = setup({ checksId: 'CHECKS' });  // set, but not shared with the script
+  const r = s.call(s.admin, 'data');
+  assert.ok(r.ok);
+  assert.strictEqual(r.checks, null);
+  assert.match(r.checksError, /شيت الشيكات/);
+  assert.match(s.call(s.admin, 'add', { account: 'A1', amount: 1 }).error, /شيت الشيكات/);
+
+  const renamed = withChecks();
+  renamed.checksBook.sheets.set('شيكات', renamed.checksBook.sheets.get('الشيكات (2)'));
+  renamed.checksBook.sheets.delete('الشيكات (2)');
+  assert.match(renamed.call(renamed.admin, 'data').checksError, /CHECKS_TAB/);
+});
+
+test('checks: without CHECKS_SHEET_ID nothing changes', () => {
+  const s = setup();
+  const r = s.call(s.admin, 'data');
+  assert.strictEqual(r.checks, null);
+  assert.strictEqual(r.checksError, '');
+  assert.strictEqual(s.call(s.admin, 'add', { account: 'B1', amount: 100 }).request.verdict, 'سليمة');
 });
 
 test('a missing source link gives a clear message', () => {

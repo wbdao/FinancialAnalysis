@@ -145,7 +145,7 @@ td .sub { display: block; color: var(--muted); font-size: 12px; }
 .decision.warn { color: var(--warn); background: var(--warn-bg); }
 .decision.stop { color: var(--stop); background: var(--stop-bg); }
 .decision small { display: block; font-size: 14px; font-weight: 400; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
 .cards h3 { font-size: 14px; margin-bottom: 6px; }
 .cards .why { margin-top: 6px; font-size: 13.5px; }
 dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 16px; margin: 0; font-size: 14px; }

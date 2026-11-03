@@ -43,6 +43,109 @@ test('missing requests-sheet columns are reported by name', () => {
   assert.deepStrictEqual(all.issues.missingColumns, []);
 });
 
+/* ---- checks: the rules of CSAccounts ---- */
+const checkMain = (rows) => [['NN', 'كود العميل', 'رقم الشيك', 'قيمة الشيك', 'دفعات شيكات', 'صافى الشيك', 'تاريخ الاستحقاق', 'الحاله', 'حالة الصرف'], ...rows];
+const checkWh = (rows) => [['WH', 'كود العميل', 'رقم الشيك', 'قيمة الشيك', 'التحصيل', 'الصافي', 'تاريخ الاستحقاق', 'mm'], ...rows];
+
+test('checks: settled statuses close a check, net falls back to amount minus payments', () => {
+  const list = Engine.parseChecks(checkMain([
+    ['CH1', 'A', '1', 1000, 0, 1000, day(2026, 7, 1), 'تحت التحصيل', ''],
+    ['CH2', 'A', '2', 2000, 0, 2000, day(2026, 7, 1), 'خالص', ''],
+    ['CH3', 'A', '3', 3000, 0, 3000, day(2026, 7, 1), 'متابعة حساب', ''],
+    ['CH4', 'A', '4', 4000, 0, 4000, day(2026, 7, 1), 'غير تابع', ''],
+    ['CH5', 'A', '5', 5000, 1500, '', '2026-07-01', '', 'تم الرفض'],
+    ['', '', '', 99999, 0, 99999, '', '', ''],
+  ]), null);
+  assert.deepStrictEqual(list.map((k) => k.open), [true, false, false, false, true]);
+  assert.strictEqual(list[4].net, 3500);
+  assert.strictEqual(list[4].rejected, true);
+  assert.strictEqual(list[4].due, day(2026, 7, 1));
+});
+
+test('checks: a warehouse check is open only at NN, and one in both tabs counts once', () => {
+  const list = Engine.parseChecks(
+    checkMain([['CH1', 'A', '1', 1000, 0, 1000, '', 'تحت التحصيل', '']]),
+    checkWh([
+      ['WH1', 'A', '1', 1000, 0, 1000, '', 'NN'],
+      ['WH2', 'A', '2', 700, 200, '', '1/8/2026', 'NN'],
+      ['WH3', 'A', '3', 900, 0, 900, '', 'محصل'],
+    ]),
+  );
+  assert.strictEqual(list.length, 3);
+  assert.deepStrictEqual(list.map((k) => [k.src, k.open, k.net]), [['main', true, 1000], ['wh', true, 500], ['wh', false, 900]]);
+  assert.strictEqual(list[1].due, day(2026, 8, 1));
+});
+
+test('checks: a header merged with a totals cell is still found', () => {
+  const list = Engine.parseChecks([['', '15 كود العميل', 'صافى الشيك', 'الحاله'], ['', 'A', 800, '']], null);
+  assert.strictEqual(list[0].account, 'A');
+  assert.strictEqual(list[0].net, 800);
+});
+
+const checkBase = baseSheet([['A', 'عميل', '', 10000, 8000, 0, 'Net30', 'م']]);
+const checkTx = asOf(
+  ['A', 'Sales order', day(2026, 6, 20), 9000, 'V1', 'I1', ''],
+  ['A', 'Payment', day(2026, 6, 25), -5000, 'V2', '', 'شيك'],
+);
+
+test('checks: open checks join the exposure for limit and guarantee', () => {
+  const r = Engine.analyze(checkBase, checkTx, null, null, {
+    main: checkMain([['CH1', 'A', '1', 5000, 0, 5000, day(2026, 8, 1), '', '']]),
+  });
+  const c = cust(r, 'A');
+  assert.strictEqual(c.balance, 4000);
+  assert.strictEqual(c.checksOpen, 5000);
+  assert.strictEqual(c.exposure, 9000);
+  assert.strictEqual(c.availableCredit, 1000);
+  assert.strictEqual(c.uncovered, 1000);
+  assert.strictEqual(c.checksNextDue, day(2026, 8, 1));
+  const ok = Engine.evaluateNew(c, 1000);
+  assert.strictEqual(ok.exposureAfter, 10000);
+  assert.strictEqual(ok.checks.credit.level, 'ok');
+  assert.strictEqual(ok.checks.cheques.label, 'شيكات تحت التحصيل');
+  // Without the checks the same invoice would have looked far inside the limit.
+  assert.strictEqual(Engine.evaluateNew(c, 2000).checks.credit.level, 'stop');
+  assert.strictEqual(Engine.evaluateNew(cust(Engine.analyze(checkBase, checkTx), 'A'), 2000).checks.credit.level, 'ok');
+});
+
+test('checks: a rejected check stops new credit, a due uncashed one asks for approval', () => {
+  const run = (rows) => cust(Engine.analyze(checkBase, checkTx, null, null, { main: checkMain(rows) }), 'A');
+  const rejected = run([['CH1', 'A', '1', 300, 0, 300, day(2026, 8, 1), '', 'تم الرفض']]);
+  assert.strictEqual(Engine.evaluateNew(rejected, 1).checks.cheques.level, 'stop');
+  assert.strictEqual(rejected.checksRejectedCount, 1);
+  const due = run([['CH1', 'A', '1', 3000, 0, 3000, day(2026, 6, 30), '', '']]);
+  assert.strictEqual(due.checksDue, 3000);
+  assert.strictEqual(Engine.evaluateNew(due, 1).checks.cheques.level, 'warn');
+  const small = run([['CH1', 'A', '1', 500, 0, 500, day(2026, 6, 1), '', '']]);
+  assert.strictEqual(Engine.evaluateNew(small, 1).checks.cheques.level, 'ok');
+  const settled = run([['CH1', 'A', '1', 3000, 0, 3000, day(2026, 6, 1), 'خالص', 'تم الرفض']]);
+  assert.strictEqual(settled.checksOpen, 0);
+  assert.strictEqual(Engine.evaluateNew(settled, 1).checks.cheques.label, 'لا توجد شيكات مفتوحة');
+});
+
+test('checks: without the checks sheet the check says so and changes nothing', () => {
+  const c = cust(Engine.analyze(checkBase, checkTx), 'A');
+  assert.strictEqual(c.exposure, c.balance);
+  const e = Engine.evaluateNew(c, 1);
+  assert.strictEqual(e.checks.cheques.level, 'ok');
+  assert.strictEqual(e.checks.cheques.label, 'بيانات الشيكات غير متاحة');
+});
+
+test('checks: totals and checks of unknown accounts are reported', () => {
+  const r = Engine.analyze(checkBase, checkTx, null, null, {
+    main: checkMain([
+      ['CH1', 'A', '1', 1000, 0, 1000, day(2026, 6, 1), '', ''],
+      ['CH2', 'A', '2', 400, 0, 400, day(2026, 8, 1), '', 'تم الرفض'],
+      ['CH3', 'GHOST', '3', 900, 0, 900, '', '', ''],
+    ]),
+  });
+  assert.strictEqual(r.summary.hasChecks, true);
+  assert.strictEqual(r.summary.checksOpen, 1400);
+  assert.strictEqual(r.summary.checksDue, 1000);
+  assert.strictEqual(r.summary.checksRejectedCount, 1);
+  assert.strictEqual(r.issues.checksUnmatched, 1);
+});
+
 test('FIFO settles the oldest invoice first and leaves the rest open', () => {
   const r = Engine.analyze(
     baseSheet([['A', 'عميل', '', 100000, 100000, 0, 'Net30', 'م']]),

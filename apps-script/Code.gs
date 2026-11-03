@@ -19,10 +19,14 @@ const ADMIN_PASSWORD = 'غيّر-هذه-الكلمة';   // دخول المدي�
 const SOURCE_SHEET_ID = '';                 // معرّف شيت العملاء والحركات، من رابطه بعد /d/
 const BASE_TAB = 'قاعده عملاء الشركه';
 const TX_TAB = 'حركات العملاء';
+// اختياري: شيت الشيكات (نفس الذي يقرؤه موقع حسابات العملاء). فارغ = التحليل بدون شيكات
+const CHECKS_SHEET_ID = '';
+const CHECKS_TAB = 'الشيكات (2)';
+const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون شيكات المخازن
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-03-a4';
+const BUILD = '2026-11-04-a5';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -75,6 +79,10 @@ const COLUMNS = {
   decidedAt: 'تاريخ الاعتماد',
   decisionNote: 'ملاحظات الاعتماد',
   verdictAtDecision: 'نتيجة الفحص عند القرار',
+  checksOpen: 'شيكات مفتوحة',
+  checksDue: 'شيكات مستحقة لم تُصرف',
+  checksRejected: 'شيكات مرفوضة',
+  exposureAfter: 'التعرض بعد الفاتورة (شامل الشيكات)',
   ref: 'مرجع الإرسال',
 };
 const USER_COLUMNS = {
@@ -358,34 +366,41 @@ function sourceBook_() {
   }
 }
 
-// Tolerates extra spaces and common spelling variants, as CSAccounts does.
-function findTab_(book, tab) {
+/**
+ * findTab_ - a tab by name, tolerating extra spaces and common spelling variants
+ * as CSAccounts does. The customer tabs also accept one tab whose name looks alike.
+ * @param {string=} where the file and settings to name in the error, for the checks sheet
+ */
+function findTab_(book, tab, where) {
   const norm = function (s) {
     return text_(s).replace(/\s+/g, ' ').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي');
   };
   const tabs = book.getSheets();
   const same = tabs.filter(function (s) { return norm(s.getName()) === norm(tab); });
   if (same.length === 1) return same[0];
-  const hint = tab === BASE_TAB ? /عملاء الشرك|قاعد/ : /حركات/;
-  const like = tabs.filter(function (s) { return hint.test(norm(s.getName())); });
+  const hint = tab === BASE_TAB ? /عملاء الشرك|قاعد/ : tab === TX_TAB ? /حركات/ : null;
+  const like = hint ? tabs.filter(function (s) { return hint.test(norm(s.getName())); }) : [];
   if (like.length === 1) return like[0];
   const names = tabs.map(function (s) { return '"' + s.getName() + '"'; }).join('، ');
-  throw new Error('لم أجد شيت "' + tab + '" في شيت العملاء. التبويبات الموجودة: ' + names + '. اكتب الاسم الصحيح في BASE_TAB أو TX_TAB.');
+  throw new Error('لم أجد شيت "' + tab + '" في ' + (where || 'شيت العملاء') + '. التبويبات الموجودة: ' + names +
+    '. اكتب الاسم الصحيح في ' + (where ? 'CHECKS_TAB أو CHECKS_WH_TAB' : 'BASE_TAB أو TX_TAB') + '.');
 }
 
 function isDate_(v) { return Object.prototype.toString.call(v) === '[object Date]'; }
 
 // Only the columns the engine knows leave the sheet, with dates as epoch days.
 function sourceRows_(book, tab, spec) {
-  const sh = findTab_(book, tab);
-  const values = sh.getDataRange().getValues();
+  const values = findTab_(book, tab).getDataRange().getValues();
   if (!values.length) return [[]];
   const wanted = {};
   Object.keys(spec).forEach(function (k) { spec[k].forEach(function (n) { wanted[n.toLowerCase()] = true; }); });
   const keep = [];
   values[0].forEach(function (h, i) { if (wanted[text_(h).toLowerCase()]) keep.push(i); });
-  const tz = book.getSpreadsheetTimeZone();
-  return values.map(function (row) {
+  return project_(values, keep, book.getSpreadsheetTimeZone());
+}
+
+function project_(rows, keep, tz) {
+  return rows.map(function (row) {
     return keep.map(function (i) {
       const v = row[i];
       if (!isDate_(v)) return v;
@@ -393,6 +408,43 @@ function sourceRows_(book, tab, spec) {
       return Date.UTC(p[0], p[1] - 1, p[2]) / 86400000;
     });
   });
+}
+
+/**
+ * checkRows_ - one checks tab, header first, cut to the accounts in scope.
+ * Its header may sit under a totals row, so the header is the first of the top
+ * rows that names the customer code; it may also be merged ("15 كود العميل").
+ */
+function checkRows_(book, tab, spec, mine) {
+  const values = findTab_(book, tab, 'شيت الشيكات').getDataRange().getValues();
+  const names = function (h) { return text_(h); };
+  const isCode = function (h) { return names(h) === 'كود العميل' || names(h).slice(-' كود العميل'.length) === ' كود العميل'; };
+  const at = values.slice(0, 5).findIndex(function (r) { return r.some(isCode); });
+  if (at < 0) throw new Error('لم أجد عمود "كود العميل" في أول صفوف تبويب "' + tab + '" في شيت الشيكات.');
+  const header = values[at];
+  const keep = [];
+  header.forEach(function (h, i) {
+    const wanted = Object.keys(spec).some(function (k) {
+      return spec[k].some(function (n) { return names(h) === n || names(h).slice(-(n.length + 1)) === ' ' + n; });
+    });
+    if (wanted) keep.push(i);
+  });
+  const code = header.findIndex(isCode);
+  const rows = [header].concat(values.slice(at + 1).filter(function (r) { return mine(text_(r[code])); }));
+  return project_(rows, keep, book.getSpreadsheetTimeZone());
+}
+
+function checksOf_(mine) {
+  if (!CHECKS_SHEET_ID) return null;
+  let book;
+  try {
+    book = SpreadsheetApp.openById(CHECKS_SHEET_ID);
+  } catch (e) {
+    throw new Error('تعذّر فتح شيت الشيكات. تأكد من CHECKS_SHEET_ID، وأنه Google Sheet، وأن حساب ناشر السكربت يملك صلاحية عليه.');
+  }
+  const main = checkRows_(book, CHECKS_TAB, Engine.CHECK_COLS.main, mine);
+  const hasWh = CHECKS_WH_TAB && book.getSheets().some(function (s) { return text_(s.getName()) === CHECKS_WH_TAB; });
+  return { main: main, wh: hasWh ? checkRows_(book, CHECKS_WH_TAB, Engine.CHECK_COLS.wh, mine) : null };
 }
 
 function columnOf_(rows, names) {
@@ -431,15 +483,26 @@ function scopedSheets_(who, account) {
     return true;
   }));
   const txOut = wholeSheet ? tx : [tx[0]].concat(tx.slice(1).filter(function (r) { return allowed[text_(r[txAccount])]; }));
-  return { base: baseOut, tx: txOut, analysisDay: analysisDay };
+  const mine = function (code) { return !!code && (wholeSheet || allowed[code] === true); };
+  return { base: baseOut, tx: txOut, analysisDay: analysisDay, mine: mine };
 }
 
 function data_(who) {
   const started = Date.now();
   const sheets = scopedSheets_(who, '');
+  // The screens still work without the checks; the site shows why they are missing.
+  let checks = null, checksError = '';
+  try {
+    checks = checksOf_(sheets.mine);
+  } catch (e) {
+    checksError = e.message;
+  }
   return {
-    base: sheets.base, tx: sheets.tx, analysisDay: sheets.analysisDay, rules: rules_(),
-    stats: { ms: Date.now() - started, customers: sheets.base.length - 1, movements: sheets.tx.length - 1 },
+    base: sheets.base, tx: sheets.tx, analysisDay: sheets.analysisDay, rules: rules_(), checks: checks, checksError: checksError,
+    stats: {
+      ms: Date.now() - started, customers: sheets.base.length - 1, movements: sheets.tx.length - 1,
+      checks: checks ? checks.main.length - 1 + (checks.wh ? checks.wh.length - 1 : 0) : 0,
+    },
   };
 }
 
@@ -449,7 +512,9 @@ function evaluate_(who, account, amount) {
   const sheets = scopedSheets_(who, account);
   if (sheets.base.length < 2) throw new Error('العميل غير موجود في قاعدة العملاء أو خارج نطاق مخازنك: ' + account);
   const rules = rules_();
-  const c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay).customers[0];
+  // Unlike the screens, a request is never checked without the checks: a failure stops it.
+  const checks = checksOf_(sheets.mine);
+  const c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, checks).customers[0];
   const result = Engine.evaluateNew(c, amount, rules);
   const reasons = Object.keys(result.checks)
     .map(function (k) { return result.checks[k]; })
@@ -459,6 +524,7 @@ function evaluate_(who, account, amount) {
     account: c.account, customer: c.name, rep: c.rep, idNumber: c.idNumber, warehouse: c.warehouse, group: c.group,
     amount: amount, balance: c.balance, balanceAfter: result.balanceAfter, creditLimit: c.creditLimit, guarantee: c.guarantee,
     uncovered: result.uncovered, overdue: c.overdue, oldestDays: c.oldestOverdueDays,
+    checksOpen: c.checksOpen, checksDue: c.checksDue, checksRejected: c.checksRejected, exposureAfter: result.exposureAfter,
     dataDate: Utilities.formatDate(new Date(sheets.analysisDay * 86400000), 'UTC', 'yyyy-MM-dd'),
     verdict: result.verdict, verdictLabel: VERDICTS[result.verdict], reasons: reasons,
   };
@@ -483,7 +549,8 @@ function add_(req, who) {
     const row = {};
     Object.keys(COLUMNS).forEach(function (f) { row[f] = ''; });
     ['account', 'customer', 'rep', 'idNumber', 'warehouse', 'group', 'dataDate', 'reasons'].forEach(function (f) { row[f] = safe_(check[f]); });
-    ['amount', 'balance', 'balanceAfter', 'creditLimit', 'guarantee', 'uncovered', 'overdue', 'oldestDays'].forEach(function (f) { row[f] = check[f]; });
+    ['amount', 'balance', 'balanceAfter', 'creditLimit', 'guarantee', 'uncovered', 'overdue', 'oldestDays',
+      'checksOpen', 'checksDue', 'checksRejected', 'exposureAfter'].forEach(function (f) { row[f] = check[f]; });
     row.id = nextId_(all);
     row.createdAt = now_();
     row.verdict = check.verdictLabel;

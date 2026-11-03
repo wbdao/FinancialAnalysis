@@ -161,12 +161,14 @@
     if (issues.notInBase) parts.push(`${issues.notInBase} حساب غير موجود في قاعدة العملاء، فاعتُبر بلا حد ائتمان أو ضمان`);
     if (issues.blankGuarantee) parts.push(`${issues.blankGuarantee} عميل خانة ضمانه فارغة`);
     if (issues.balanceDiffs) parts.push(`${issues.balanceDiffs} عميل رصيده المحسوب من الحركات يختلف عن رصيد القاعدة`);
+    if (issues.checksUnmatched) parts.push(`${issues.checksUnmatched} حساب له شيكات مفتوحة وغير موجود في قاعدة العملاء`);
+    if (state.sheets.checksError) parts.push(`الشيكات غير محسوبة: ${state.sheets.checksError}`);
     return parts.length ? `مراجعة البيانات: ${parts.join('، ')}.` : '';
   }
 
   function recompute() {
-    const { base, tx, analysisDay } = state.sheets;
-    state.result = Engine.analyze(base, tx, state.rules, analysisDay);
+    const { base, tx, analysisDay, checks } = state.sheets;
+    state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
     $('stamp').textContent = `${state.isDemo ? 'بيانات نموذجية · ' : ''}المتأخرات محسوبة حتى ${dateOf(state.result.analysisDay)} (آخر حركة في الشيت)`;
     const demoNote = state.isDemo ? 'هذه بيانات نموذجية للتجربة وليست بيانات حقيقية. ' : '';
@@ -184,7 +186,7 @@
     $('reload').disabled = true;
     try {
       const data = await callScript('data');
-      state.sheets = { base: data.base, tx: data.tx, analysisDay: data.analysisDay };
+      state.sheets = { base: data.base, tx: data.tx, analysisDay: data.analysisDay, checks: data.checks, checksError: data.checksError };
       state.rules = data.rules;
       console.info('data read', data.stats);
       recompute();
@@ -198,9 +200,9 @@
   }
 
   function loadDemo() {
-    const { base, tx } = window.demoSheets();
+    const { base, tx, checks } = window.demoSheets();
     state.isDemo = true;
-    state.sheets = { base, tx, analysisDay: null };
+    state.sheets = { base, tx, analysisDay: null, checks, checksError: '' };
     state.rules = Engine.DEFAULT_RULES;
     state.user = null;
     $('whoami').textContent = 'وضع التجربة';
@@ -238,6 +240,7 @@
       kpi('غير مغطى بالضمان', money(s.uncoveredAmount), s.openAmount ? `${Math.round((s.uncoveredAmount / s.openAmount) * 100)}% من المفتوح` : '—'),
       kpi('تجاوز حد الائتمان', money(s.overLimitAmount), `${money(s.overLimitCustomers)} عميل`),
       kpi('فواتير حرجة', money(s.byVerdict.stop.count), `متبقٍ ${money(s.byVerdict.stop.amount)}`),
+      s.hasChecks ? kpi('شيكات مفتوحة', money(s.checksOpen), `مستحقة لم تُصرف ${money(s.checksDueCount)} · مرفوضة ${money(s.checksRejectedCount)}`) : '',
     ].join('');
     $('aging').innerHTML = Engine.AGING_BUCKETS.map((label, i) => `
       <button type="button" data-bucket="${i}" aria-pressed="${state.bucket === i}">
@@ -312,6 +315,11 @@
       ${row('ID number', c.idNumber || 'فارغ')}
       ${row('Warehouse Group', c.warehouse || 'فارغ')}
       ${row('Customer group', c.group || 'فارغ')}
+      ${c.hasChecks ? row('شيكات مفتوحة', `${money(c.checksOpen)} (${c.checksOpenCount})`) : ''}
+      ${c.hasChecks ? row('الرصيد شامل الشيكات', money(c.exposure)) : ''}
+      ${c.hasChecks ? row('شيكات مستحقة لم تُصرف', c.checksDueCount ? `${money(c.checksDue)} (${c.checksDueCount})` : '—') : ''}
+      ${c.hasChecks ? row('شيكات مرفوضة', c.checksRejectedCount ? `${money(c.checksRejected)} (${c.checksRejectedCount})` : '—') : ''}
+      ${c.hasChecks && c.checksNextDue != null ? row('أقرب استحقاق شيك', dateOf(c.checksNextDue)) : ''}
     </dl>`;
   }
 
@@ -386,12 +394,18 @@
     state.lastCheck = { c, r, amount, ref: `R${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` };
     const [title, sub] = NEW_VERDICT[r.verdict];
     const card = (name, check, why) => `<div class="panel"><h3>${name}</h3>${noteCell(check)}<p class="why">${esc(why)}</p></div>`;
+    const afterLabel = c.hasChecks ? 'الرصيد شامل الشيكات بعد الفاتورة' : 'الرصيد بعد الفاتورة';
     const creditWhy = c.stopped ? 'حساب العميل موقوف.'
       : c.creditLimit <= 0 ? 'لا يوجد حد ائتمان مسجل لهذا العميل.'
-      : `الرصيد بعد الفاتورة ${money(r.balanceAfter)} من حد ${money(c.creditLimit)}. المتاح الآن ${money(r.maxByCredit)}.`;
+      : `${afterLabel} ${money(r.exposureAfter)} من حد ${money(c.creditLimit)}. المتاح الآن ${money(r.maxByCredit)}.`;
     const guaranteeWhy = c.guarantee > 0
       ? `الضمان ${money(c.guarantee)}، وغير المغطى بعد الفاتورة ${money(r.uncovered)}.`
-      : `لا يوجد ضمان، والرصيد بعد الفاتورة ${money(r.balanceAfter)}.`;
+      : `لا يوجد ضمان، و${afterLabel} ${money(r.exposureAfter)}.`;
+    const chequesWhy = !c.hasChecks ? 'شيت الشيكات غير مربوط، فالرصيد لا يشمل الشيكات تحت التحصيل.'
+      : c.checksRejectedCount ? `${c.checksRejectedCount} شيك مرفوض بقيمة ${money(c.checksRejected)} لم يُسوَّ بعد.`
+      : c.checksDueCount ? `${c.checksDueCount} شيك استحق ولم يُصرف بقيمة ${money(c.checksDue)}.`
+      : c.checksOpenCount ? `${c.checksOpenCount} شيك تحت التحصيل بقيمة ${money(c.checksOpen)}، ومحسوبة في الرصيد.`
+      : 'لا توجد شيكات مفتوحة على العميل.';
     const arrearsWhy = c.overdue >= 1
       ? `متأخرات ${money(c.overdue)}، وأقدمها متأخر ${c.oldestOverdueDays} يوم. تصبح حرجة بعد ${state.result.rules.stopDays} يوم.`
       : 'لا توجد متأخرات على العميل.';
@@ -402,6 +416,7 @@
           ${card('الائتمان', r.checks.credit, creditWhy)}
           ${card('الضمان', r.checks.guarantee, guaranteeWhy)}
           ${card('المتأخرات', r.checks.arrears, arrearsWhy)}
+          ${card('الشيكات', r.checks.cheques, chequesWhy)}
         </div>
         <div class="panel request-form">
           <h3>تسجيل طلب الفاتورة</h3>
@@ -501,7 +516,7 @@
       if (state.deciding !== r) return;
       $('decisionCurrent').innerHTML = `
         <b>الموقف الآن:</b><span class="tag ${check.verdict}">${esc(check.verdictLabel)}</span>
-        <span class="sub">الرصيد بعد الفاتورة ${money(check.balanceAfter)} من حد ${money(check.creditLimit)} · الضمان ${money(check.guarantee)} · المتأخرات ${money(check.overdue)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
+        <span class="sub">الرصيد شامل الشيكات بعد الفاتورة ${money(check.exposureAfter)} من حد ${money(check.creditLimit)} · الضمان ${money(check.guarantee)} · المتأخرات ${money(check.overdue)} · شيكات مرفوضة ${money(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
       $('approve').disabled = $('reject').disabled = false;
     } catch (e) {
       $('decisionCurrent').textContent = '';

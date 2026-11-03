@@ -31,6 +31,22 @@
   };
   const REQUIRED = { base: ['account', 'name', 'creditLimit'], tx: ['account', 'kind', 'date', 'amount'] };
 
+  // The checks sheet, read as CSAccounts reads it. A received check is booked as
+  // a payment at once, so an open check is debt the balance no longer shows.
+  // Main tab: these statuses are settled, any other is open. Warehouse tab: only mm = "NN" is open.
+  const CHECK_SETTLED = ['خالص', 'متابعة حساب', 'غير تابع'];
+  const CHECK_REJECTED = 'تم الرفض';
+  const CHECK_COLS = {
+    main: {
+      account: ['كود العميل'], checkNo: ['رقم الشيك'], amount: ['قيمة الشيك'], paid: ['دفعات شيكات'],
+      net: ['صافى الشيك', 'صافي الشيك'], due: ['تاريخ الاستحقاق'], status: ['الحاله', 'الحالة'], cash: ['حالة الصرف'],
+    },
+    wh: {
+      account: ['كود العميل'], checkNo: ['رقم الشيك'], amount: ['قيمة الشيك'], collected: ['التحصيل'],
+      net: ['الصافي', 'الصافى'], due: ['تاريخ الاستحقاق'], state: ['mm'],
+    },
+  };
+
   function dayOf(y, m, d) { return Date.UTC(y, m - 1, d) / 86400000; }
 
   const str = (v) => (v == null ? '' : String(v).trim());
@@ -92,6 +108,14 @@
     return { level: 'warn', amount: uncovered, label: guarantee > 0 ? 'مغطاة جزئيًا' : 'بدون ضمان' };
   }
 
+  // A rejected check still open stops new credit; a due check not yet cashed asks for approval.
+  function chequesCheck(c, rules) {
+    if (!c.hasChecks) return { level: 'ok', amount: 0, label: 'بيانات الشيكات غير متاحة' };
+    if (c.checksRejectedCount) return { level: 'stop', amount: c.checksRejected, label: `شيكات مرفوضة (${c.checksRejectedCount})` };
+    if (c.checksDue >= rules.tolerance) return { level: 'warn', amount: c.checksDue, label: `شيكات مستحقة لم تُصرف (${c.checksDueCount})` };
+    return { level: 'ok', amount: 0, label: c.checksOpenCount ? 'شيكات تحت التحصيل' : 'لا توجد شيكات مفتوحة' };
+  }
+
   function arrearsCheck(overdue, days, rules) {
     if (overdue < rules.tolerance) return { level: 'ok', amount: 0, days: 0, label: 'لا توجد متأخرات' };
     return { level: days > rules.stopDays ? 'stop' : 'warn', amount: overdue, days, label: `متأخرة ${days} يوم` };
@@ -125,8 +149,10 @@
    * @param {!Object=} rulesIn overrides of DEFAULT_RULES
    * @param {?number=} analysisDayIn the date to age against. A user limited to
    *     some warehouses gets it from the whole sheet, so their aging matches everyone's.
+   * @param {?{main: ?Array<!Array>, wh: ?Array<!Array>}=} checkRows the checks tabs,
+   *     header first. Without them every check figure is zero and the results are unchanged.
    */
-  function analyze(baseRows, txRows, rulesIn, analysisDayIn) {
+  function analyze(baseRows, txRows, rulesIn, analysisDayIn, checkRows) {
     const rules = Object.assign({}, DEFAULT_RULES, rulesIn);
     const bi = mapHeader(baseRows[0] || [], BASE_COLS, REQUIRED.base, 'قاعدة العملاء');
     const ti = mapHeader(txRows[0] || [], TX_COLS, REQUIRED.tx, 'حركات العملاء');
@@ -163,13 +189,25 @@
       txByAccount.get(t.account).push(t);
     }
 
+    // ---- checks ---------------------------------------------------------------
+    const hasChecks = !!(checkRows && (checkRows.main || checkRows.wh));
+    const checksByAccount = new Map();
+    if (hasChecks) {
+      for (const k of parseChecks(checkRows.main, checkRows.wh)) {
+        if (!checksByAccount.has(k.account)) checksByAccount.set(k.account, []);
+        checksByAccount.get(k.account).push(k);
+      }
+    }
+
     // ---- customers ----------------------------------------------------------
     const customers = [];
     const seen = new Set();
     const add = (base) => {
       if (seen.has(base.account)) return;
       seen.add(base.account);
-      customers.push(computeCustomer(base, txByAccount.get(base.account) || [], analysisDay, rules));
+      const c = computeCustomer(base, txByAccount.get(base.account) || [], analysisDay, rules, checksByAccount.get(base.account) || []);
+      c.hasChecks = hasChecks;
+      customers.push(c);
     };
     for (let r = 1; r < baseRows.length; r++) {
       const row = baseRows[r];
@@ -190,12 +228,16 @@
       add({ account, name: account, warehouse: '', group: '', creditLimit: 0, guarantee: 0, baseBalance: null, terms: '', rep: 'بدون مندوب', idNumber: '', inBase: false });
     }
     issues.balanceDiffs = customers.filter((c) => c.baseBalance != null && Math.abs(c.baseBalance - c.balance) >= 1).length;
+    // Open checks of accounts unknown to the customer base add to nobody's exposure.
+    issues.checksUnmatched = [...checksByAccount.keys()].filter((a) => !seen.has(a) && checksByAccount.get(a).some((k) => k.open)).length;
 
     const invoices = customers.flatMap((c) => c.invoices);
-    return { customers, invoices, analysisDay, rules, issues, summary: summarize(customers, invoices) };
+    const summary = summarize(customers, invoices);
+    summary.hasChecks = hasChecks;
+    return { customers, invoices, analysisDay, rules, issues, summary };
   }
 
-  function computeCustomer(base, list, analysisDay, rules) {
+  function computeCustomer(base, list, analysisDay, rules, checks) {
     const c = Object.assign({}, base, {
       contractDays: termDays(base.terms), balance: 0, unapplied: 0, overdue: 0, oldestOverdueDays: 0,
       aging: [0, 0, 0, 0, 0, 0], invoices: [],
@@ -243,9 +285,26 @@
       inv.covered = Math.min(guaranteeLeft, inv.remaining);
       guaranteeLeft -= inv.covered;
     }
-    c.uncovered = c.balance > 0 ? Math.max(0, c.balance - c.guarantee) : 0;
-    c.availableCredit = c.creditLimit > 0 ? Math.max(0, c.creditLimit - c.balance) : 0;
-    c.overLimit = c.creditLimit > 0 ? Math.max(0, c.balance - c.creditLimit) : 0;
+    // Exposure: the balance plus the open checks it no longer shows.
+    c.checksOpen = 0;
+    c.checksOpenCount = 0;
+    c.checksDue = 0;
+    c.checksDueCount = 0;
+    c.checksRejected = 0;
+    c.checksRejectedCount = 0;
+    c.checksNextDue = null;
+    for (const k of checks) {
+      if (!k.open) continue;
+      c.checksOpen += k.net;
+      c.checksOpenCount++;
+      if (k.rejected) { c.checksRejected += k.net; c.checksRejectedCount++; }
+      else if (k.due != null && k.due <= analysisDay) { c.checksDue += k.net; c.checksDueCount++; }
+      else if (k.due != null && (c.checksNextDue == null || k.due < c.checksNextDue)) c.checksNextDue = k.due;
+    }
+    c.exposure = c.balance + c.checksOpen;
+    c.uncovered = c.exposure > 0 ? Math.max(0, c.exposure - c.guarantee) : 0;
+    c.availableCredit = c.creditLimit > 0 ? Math.max(0, c.creditLimit - c.exposure) : 0;
+    c.overLimit = c.creditLimit > 0 ? Math.max(0, c.exposure - c.creditLimit) : 0;
     for (const inv of c.invoices) finishInvoice(inv, c, analysisDay, rules);
     return c;
   }
@@ -294,17 +353,20 @@
   function evaluateNew(c, amount, rules) {
     const r = Object.assign({}, DEFAULT_RULES, rules);
     const balanceAfter = c.balance + amount;
-    const uncovered = balanceAfter > 0 ? Math.max(0, balanceAfter - c.guarantee) : 0;
+    // Credit and guarantee are measured on the exposure, open checks included.
+    const exposureAfter = (c.exposure != null ? c.exposure : c.balance) + amount;
+    const uncovered = exposureAfter > 0 ? Math.max(0, exposureAfter - c.guarantee) : 0;
     const overdueUncovered = Math.max(0, c.overdue - c.guarantee);
     const checks = {
       credit: c.stopped
         ? { level: 'stop', amount, label: 'العميل موقوف' }
-        : creditCheck(c.creditLimit, balanceAfter, amount, r.overLimit),
+        : creditCheck(c.creditLimit, exposureAfter, amount, r.overLimit),
       guarantee: guaranteeCheck(c.guarantee, uncovered, overdueUncovered, r),
       arrears: arrearsCheck(c.overdue, c.oldestOverdueDays, r),
+      cheques: chequesCheck(c, r),
     };
     return {
-      amount, balanceAfter, uncovered, checks, verdict: worst(Object.values(checks)),
+      amount, balanceAfter, exposureAfter, uncovered, checks, verdict: worst(Object.values(checks)),
       // The largest invoice the credit limit still allows.
       maxByCredit: c.stopped ? 0 : c.availableCredit,
     };
@@ -315,6 +377,7 @@
       invoices: invoices.length, open: 0, openAmount: 0, overdueAmount: 0, uncoveredAmount: 0,
       byVerdict: { ok: { count: 0, amount: 0 }, warn: { count: 0, amount: 0 }, stop: { count: 0, amount: 0 }, paid: { count: 0, amount: 0 } },
       aging: [0, 0, 0, 0, 0, 0], overLimitAmount: 0, overLimitCustomers: 0,
+      checksOpen: 0, checksDue: 0, checksDueCount: 0, checksRejected: 0, checksRejectedCount: 0,
     };
     for (const inv of invoices) {
       const v = s.byVerdict[inv.verdict];
@@ -329,11 +392,89 @@
     }
     for (const c of customers) {
       if (c.overLimit >= PAID_BELOW) { s.overLimitCustomers++; s.overLimitAmount += c.overLimit; }
+      s.checksOpen += c.checksOpen;
+      s.checksDue += c.checksDue;
+      s.checksDueCount += c.checksDueCount;
+      s.checksRejected += c.checksRejected;
+      s.checksRejectedCount += c.checksRejectedCount;
     }
     return s;
   }
 
-  const Engine = { analyze, evaluateNew, lastMovementDay, termDays, bucketOf, dayOf, DEFAULT_RULES, AGING_BUCKETS, BASE_COLS, TX_COLS };
+  /* ---- checks ----------------------------------------------------------------- */
+
+  /** checkDay - a check date: epoch days from the server, or yyyy-mm-dd / d/m/yyyy text. */
+  function checkDay(v) {
+    if (v === '' || v == null) return null;
+    if (typeof v === 'number') return v > 1000 ? Math.floor(v) : null;
+    const t = str(v);
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t);
+    if (m) return dayOf(+m[1], +m[2], +m[3]);
+    m = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/.exec(t);
+    if (m) return dayOf(+m[3] < 100 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
+    return null;
+  }
+
+  // Column lookup that also accepts a header merged with a totals cell ("123 كود العميل").
+  function checkColumns(header, spec) {
+    const norm = header.map((h) => str(h));
+    const idx = {};
+    for (const [key, names] of Object.entries(spec)) {
+      let at = -1;
+      for (const n of names) {
+        at = norm.indexOf(n);
+        if (at < 0) at = norm.findIndex((h) => h.endsWith(' ' + n));
+        if (at >= 0) break;
+      }
+      idx[key] = at;
+    }
+    return idx;
+  }
+
+  /**
+   * parseChecks - both checks tabs as one list. A check in both tabs counts once,
+   * from the main tab. Rows without a customer (the SUBTOTAL row) are skipped.
+   */
+  function parseChecks(mainRows, whRows) {
+    const list = [];
+    const keys = new Set();
+    const read = (rows, spec, fn) => {
+      if (!rows || !rows.length) return;
+      const i = checkColumns(rows[0], spec);
+      if (i.account < 0) return;
+      const at = (row, k) => (i[k] >= 0 ? row[i[k]] : '');
+      for (let r = 1; r < rows.length; r++) fn(rows[r], at);
+    };
+    read(mainRows, CHECK_COLS.main, (row, at) => {
+      const account = str(at(row, 'account'));
+      if (!account) return;
+      const checkNo = str(at(row, 'checkNo'));
+      const amount = num(at(row, 'amount'));
+      const net = typeof at(row, 'net') === 'number' ? at(row, 'net') : amount - num(at(row, 'paid'));
+      if (checkNo) keys.add(account + '|' + checkNo);
+      list.push({
+        account, checkNo, amount, net, due: checkDay(at(row, 'due')), src: 'main',
+        open: CHECK_SETTLED.indexOf(str(at(row, 'status'))) < 0, rejected: str(at(row, 'cash')) === CHECK_REJECTED,
+      });
+    });
+    read(whRows, CHECK_COLS.wh, (row, at) => {
+      const account = str(at(row, 'account'));
+      const checkNo = str(at(row, 'checkNo'));
+      if (!account || (checkNo && keys.has(account + '|' + checkNo))) return;
+      const amount = num(at(row, 'amount'));
+      const net = typeof at(row, 'net') === 'number' ? at(row, 'net') : amount - num(at(row, 'collected'));
+      list.push({
+        account, checkNo, amount, net, due: checkDay(at(row, 'due')), src: 'wh',
+        open: str(at(row, 'state')) === 'NN', rejected: false,
+      });
+    });
+    return list;
+  }
+
+  const Engine = {
+    analyze, evaluateNew, lastMovementDay, parseChecks, termDays, bucketOf, dayOf,
+    DEFAULT_RULES, AGING_BUCKETS, BASE_COLS, TX_COLS, CHECK_COLS,
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = Engine;
   else root.Engine = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -65,23 +65,36 @@ function fakeCache() {
   };
 }
 
-/** @param {{password?: string, sourceId?: string, source?: {base: Array, tx: Array}}} options */
+/**
+ * @param {{password?: string, sourceId?: string, source?: {base: Array, tx: Array},
+ *     checksId?: string, checks?: {main: Array, wh?: Array}}} options checksId 'CHECKS' opens `checks`.
+ */
 function loadScript(options = {}) {
-  const { password = 'admin-test-pass', sourceId = 'SOURCE', source = { base: [[]], tx: [[]] } } = options;
+  const { password = 'admin-test-pass', sourceId = 'SOURCE', source = { base: [[]], tx: [[]] }, checksId = '', checks = null } = options;
   const book = fakeBook();
   const sourceBook = fakeBook();
   sourceBook.sheets.set('قاعده عملاء الشركه', new FakeSheet(source.base));
   sourceBook.sheets.set('حركات العملاء', new FakeSheet(source.tx));
+  const checksBook = fakeBook();
+  if (checks) {
+    checksBook.sheets.set('الشيكات (2)', new FakeSheet(checks.main));
+    if (checks.wh) checksBook.sheets.set('شيكات المخازن', new FakeSheet(checks.wh));
+  }
   const cache = fakeCache();
   const props = new Map();
   const dir = path.join(__dirname, '..', 'apps-script');
   const code = fs.readFileSync(path.join(dir, 'Code.gs'), 'utf8')
     .replace(/const ADMIN_PASSWORD = '[^']*'/, `const ADMIN_PASSWORD = '${password}'`)
-    .replace(/const SOURCE_SHEET_ID = '[^']*'/, `const SOURCE_SHEET_ID = '${sourceId}'`);
+    .replace(/const SOURCE_SHEET_ID = '[^']*'/, `const SOURCE_SHEET_ID = '${sourceId}'`)
+    .replace(/const CHECKS_SHEET_ID = '[^']*'/, `const CHECKS_SHEET_ID = '${checksId}'`);
   const context = vm.createContext({
     SpreadsheetApp: {
       getActiveSpreadsheet: () => book,
-      openById: (id) => { if (id === 'SOURCE') return sourceBook; throw new Error('no access'); },
+      openById: (id) => {
+        if (id === 'SOURCE') return sourceBook;
+        if (id === 'CHECKS' && checks) return checksBook;
+        throw new Error('no access');
+      },
     },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     CacheService: { getScriptCache: () => cache },
@@ -103,7 +116,7 @@ function loadScript(options = {}) {
   vm.runInContext(fs.readFileSync(path.join(dir, 'Engine.gs'), 'utf8'), context);
   vm.runInContext(code, context);
   const post = (body) => JSON.parse(vm.runInContext('doPost', context)({ postData: { contents: JSON.stringify(body) } }).text);
-  return { post, book, sourceBook, props, cache };
+  return { post, book, sourceBook, checksBook, props, cache };
 }
 
 module.exports = { loadScript, FakeSheet, REQUESTS: 'طلبات الفواتير', USERS: 'المستخدمين', LOG: 'سجل العمليات' };

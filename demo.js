@@ -32,6 +32,21 @@
       sale('DEMO-6', 90, 5000, 'INV-6001'), pay('DEMO-6', 45, 5000),
       pay('DEMO-1', 0, 2000),
     ];
-    return { base, tx };
+    // Checks as in the checks sheet: open under collection, rejected, due and not cashed, settled.
+    const check = (no, acc, amount, due, status, cash) => [`CH${no}`, acc, String(no), amount, amount, due, status, cash];
+    const checks = {
+      main: [
+        ['NN', 'كود العميل', 'رقم الشيك', 'قيمة الشيك', 'صافى الشيك', 'تاريخ الاستحقاق', 'الحاله', 'حالة الصرف'],
+        check(101, 'DEMO-1', 15000, ago(-20), 'تحت التحصيل', ''),
+        check(301, 'DEMO-3', 8000, ago(10), '', 'تم الرفض'),
+        check(401, 'DEMO-4', 6000, ago(5), '', ''),
+        check(201, 'DEMO-2', 9000, ago(30), 'خالص', ''),
+      ],
+      wh: [
+        ['WH', 'كود العميل', 'رقم الشيك', 'قيمة الشيك', 'التحصيل', 'الصافي', 'تاريخ الاستحقاق', 'mm'],
+        ['WH1', 'DEMO-1', '102', 2000, 0, 2000, ago(-40), 'NN'],
+      ],
+    };
+    return { base, tx, checks };
   };
 })();
