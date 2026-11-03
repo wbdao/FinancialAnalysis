@@ -105,7 +105,7 @@ function fakeDrive() {
  *     checksId?: string, checks?: {main: Array, wh?: Array}}} options checksId 'CHECKS' opens `checks`.
  */
 function loadScript(options = {}) {
-  const { password = 'admin-test-pass', sourceId = 'SOURCE', source = { base: [[]], tx: [[]] }, checksId = '', checks = null } = options;
+  const { password = 'admin-test-pass', sourceId = 'SOURCE', source = { base: [[]], tx: [[]] }, checksId = '', checks = null, triggersAllowed = true } = options;
   const book = fakeBook();
   const sourceBook = fakeBook();
   sourceBook.sheets.set('قاعده عملاء الشركه', new FakeSheet(source.base));
@@ -149,7 +149,11 @@ function loadScript(options = {}) {
     DriveApp: { getFileById: drive.getFileById, createFile: drive.createFile },
     MimeType: { PLAIN_TEXT: 'text/plain' },
     ScriptApp: {
-      getProjectTriggers: () => triggers.map((t) => ({ getHandlerFunction: () => t.handler })),
+      getProjectTriggers: () => {
+        // As in a project whose owner has not approved the trigger permission yet.
+        if (!triggersAllowed) throw new Error('ليس لديك إذن لاستدعاء ScriptApp.getProjectTriggers.');
+        return triggers.map((t) => ({ getHandlerFunction: () => t.handler }));
+      },
       newTrigger: (handler) => ({
         timeBased: () => ({ everyMinutes: (minutes) => ({ create: () => triggers.push({ handler, minutes }) }) }),
       }),

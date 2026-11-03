@@ -1442,8 +1442,8 @@
     formMessage($('snapshotMsg'), 'جارٍ قراءة الشيتات وتجهيز النسخة، وقد يستغرق ذلك دقيقة…');
     try {
       const data = await callScript('refresh');
-      const note = data.checksError ? ` الشيكات غير محسوبة: ${data.checksError}` : '';
-      formMessage($('snapshotMsg'), `تم التجهيز في ${Math.round(data.buildMs / 1000)} ثانية.${note}`, !!data.checksError);
+      const note = (data.checksError ? ` الشيكات غير محسوبة: ${data.checksError}` : '') + (data.triggerError ? ` ${data.triggerError}` : '');
+      formMessage($('snapshotMsg'), `تم التجهيز في ${Math.round(data.buildMs / 1000)} ثانية.${note}`, !!(data.checksError || data.triggerError));
       await loadData();
     } catch (e) {
       formMessage($('snapshotMsg'), e.message, true);

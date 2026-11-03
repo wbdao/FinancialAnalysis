@@ -491,6 +491,18 @@ test('snapshot: sheet edits appear after the trigger or the admin refresh, not b
   assert.ok(JSON.stringify(s.book.getSheetByName(LOG).grid).includes('تجهيز نسخة البيانات'));
 });
 
+test('snapshot: without the trigger permission the data still works and the admin is told', () => {
+  const s = setup({ triggersAllowed: false });
+  assert.ok(s.call(s.admin, 'data').ok);
+  assert.strictEqual(s.triggers.length, 0);
+  const r = s.call(s.admin, 'refresh');
+  assert.ok(r.ok, r.error);
+  assert.match(r.triggerError, /refreshSnapshot/);
+  assert.strictEqual(s.call(s.admin, 'add', { account: 'A1', amount: 1 }).ok, true);
+  const allowed = setup();
+  assert.strictEqual(allowed.call(allowed.admin, 'refresh').triggerError, '');
+});
+
 test('decide: one read of the requests sheet, however many requests there are', () => {
   const s = setup();
   const approver = s.addUser('amr', 'معتمد');

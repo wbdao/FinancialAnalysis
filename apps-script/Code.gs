@@ -576,7 +576,14 @@ function buildSnapshot_() {
     };
     snap.buildMs = Date.now() - started;
     saveSnapshotFile_(snap);
-    ensureTrigger_();
+    // Without the trigger the data still works: it is rebuilt on demand every 30 minutes.
+    try {
+      ensureTrigger_();
+    } catch (e) {
+      snap.triggerError = 'لم يُنشأ مؤقت التجهيز التلقائي، فستُجهَّز البيانات عند الطلب كل 30 دقيقة. ' +
+        'شغّل refreshSnapshot مرة من محرر السكربت ووافق على الصلاحيات. (' + e.message + ')';
+      console.warn(snap.triggerError);
+    }
     snapshotMemo_ = snap;
     return snap;
   } finally {
@@ -626,7 +633,7 @@ function refresh_(who) {
   snapshotMemo_ = null;
   const snap = buildSnapshot_();
   audit_(publicName_(who), 'تجهيز نسخة البيانات', Math.round(snap.buildMs / 1000) + ' ثانية');
-  return { builtAt: snap.builtAt, buildMs: snap.buildMs, checksError: snap.checksError };
+  return { builtAt: snap.builtAt, buildMs: snap.buildMs, checksError: snap.checksError, triggerError: snap.triggerError || '' };
 }
 
 function data_(who) {
