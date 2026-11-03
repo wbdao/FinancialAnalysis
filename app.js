@@ -46,7 +46,7 @@
   const state = {
     token: readToken(), user: null, sheets: null, rules: Engine.DEFAULT_RULES, isDemo: false, result: null,
     shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
-    decisionPending: false, cacheSavedAt: null,
+    decisionPending: false, decisionPreview: false, cacheSavedAt: null,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -802,13 +802,14 @@
     $('decisionRetry').hidden = true;
     $('approve').disabled = $('reject').disabled = true;
     const preview = previewCheck(r);
+    state.decisionPreview = !!preview;
     $('decisionCurrent').innerHTML = preview
       ? checkHtml(preview, 'الموقف المتوقع')
       : '<span class="sub">جارٍ جلب بيانات الطلب…</span>';
     // The preview is enough to start a decision: the script recomputes the
     // request before writing it, and the refresh below only adds live detail.
     if (preview) $('approve').disabled = $('reject').disabled = false;
-    setBusy('جارٍ التحقق من الطلب بالبيانات الحالية…');
+    setBusy(preview ? 'يتم تحديث الموقف في الخلفية…' : 'جارٍ التحقق من الطلب بالبيانات الحالية…');
     $('decision').showModal();
     await loadDecisionCheck(r);
   }
@@ -817,8 +818,9 @@
     if (state.deciding !== r) return;
     $('decisionError').hidden = true;
     $('decisionRetry').hidden = true;
-    if (!state.decisionPending) $('approve').disabled = $('reject').disabled = true;
-    setBusy('جارٍ التحقق من الطلب بالبيانات الحالية…');
+    // A preview keeps the buttons usable; the script verifies the decision.
+    if (!state.decisionPreview && !state.decisionPending) $('approve').disabled = $('reject').disabled = true;
+    setBusy(state.decisionPreview ? 'يتم تحديث الموقف في الخلفية…' : 'جارٍ التحقق من الطلب بالبيانات الحالية…');
     try {
       const { check } = await callScript('recheck', { id: r.id });
       if (state.deciding !== r || state.decisionPending) return;
@@ -1035,7 +1037,7 @@
   $('reject').addEventListener('click', () => decide('reject'));
   $('decisionRetry').addEventListener('click', () => { if (state.deciding) loadDecisionCheck(state.deciding); });
   $('decisionClose').addEventListener('click', () => $('decision').close());
-  $('decision').addEventListener('close', () => { setBusy(''); state.deciding = null; state.decisionPending = false; });
+  $('decision').addEventListener('close', () => { setBusy(''); state.deciding = null; state.decisionPending = false; state.decisionPreview = false; });
   $('userForm').addEventListener('submit', saveUser);
   $('userClear').addEventListener('click', clearUserForm);
   $('userRows').addEventListener('click', (e) => {
