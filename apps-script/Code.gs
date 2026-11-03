@@ -5,6 +5,7 @@
  * كل الطلبات POST بجسم JSON نصي: { action, token, ... } — token من login { username, password }.
  *   data       → بيانات العملاء والحركات في نطاق مخازن المستخدم
  *   ping       → تحقق سريع من الجلسة وقواعد التحليل بدون قراءة الشيتات
+ *   refresh    → إعادة تجهيز نسخة البيانات الآن (للمدير)
  *   add        → تسجيل طلب فاتورة، والخادم هو الذي يحسب الفحص
  *   list       → طلبات نطاق المستخدم
  *   recheck    → فحص طلب بالبيانات الحالية قبل القرار
@@ -13,6 +14,10 @@
  *   changePassword، logout → لكل مستخدم
  *
  * الشيتات تُنشأ تلقائيًا في شيت الطلبات: «طلبات الفواتير» و«المستخدمين» و«سجل العمليات».
+ *
+ * السرعة: كل العمليات تقرأ من «نسخة البيانات»، وهي ملف مضغوط في Drive حساب ناشر السكربت
+ * يحتوي أعمدة التحليل فقط. يعيد السكربت تجهيزها كل 15 دقيقة بمؤقت ينشئه بنفسه، والمدير يجهزها فورًا
+ * من الإعدادات. إذا توقف المؤقت، تُجهَّز عند أول طلب بعد 30 دقيقة.
  */
 
 // ===== الإعدادات: غيّرها هنا فقط، ولا ترفع القيم الحقيقية إلى GitHub =====
@@ -27,7 +32,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-04-a7';
+const BUILD = '2026-11-05-a8';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -54,6 +59,13 @@ const RULES_KEY = 'rules';
 // after reading the decision does not read the sheets again.
 const EVAL_CACHE = 'eval:v1';
 const EVAL_TTL = 60;
+// The data snapshot: the source sheets read once, gzipped into a Drive file.
+const SNAPSHOT_KEY = 'snapshot';
+const SNAPSHOT_NAME = 'موقف الفواتير - نسخة البيانات (لا تحذفها)';
+const SNAPSHOT_MINUTES = 15;                  // the trigger rebuilds it this often (1, 5, 10, 15 or 30)
+const SNAPSHOT_MAX_AGE = 30 * 60 * 1000;      // older than this, the trigger has stopped: rebuild on demand
+const SNAPSHOT_BUILDING = 'snapshot:building';
+let snapshotMemo_ = null;                     // one read per execution
 
 // اسم الحقل في الموقع ← اسم العمود في الشيت
 const COLUMNS = {
@@ -101,6 +113,7 @@ function doGet() {
 
 function doPost(e) {
   try {
+    snapshotMemo_ = null;
     const req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     if (ADMIN_PASSWORD === UNSET_PASSWORD || ADMIN_PASSWORD.length < MIN_PASSWORD) {
       throw new Error('غيّر ADMIN_PASSWORD في أول Code.gs إلى ' + MIN_PASSWORD + ' أحرف على الأقل، ثم انشر إصدارًا جديدًا.');
@@ -126,6 +139,7 @@ function route_(req, who) {
     case 'users': requireAdmin_(who); return { users: usersList_() };
     case 'userSave': requireAdmin_(who); return { users: locked_(function () { return userSave_(req, who); }) };
     case 'setRules': requireAdmin_(who); return { rules: locked_(function () { return setRules_(req, who); }) };
+    case 'refresh': requireAdmin_(who); return refresh_(who);
     default: throw new Error('طلب غير معروف');
   }
 }
@@ -440,8 +454,9 @@ function checkRows_(book, tab, spec, mine) {
   return project_(rows, keep, book.getSpreadsheetTimeZone());
 }
 
-function checksOf_(mine) {
+function readChecks_() {
   if (!CHECKS_SHEET_ID) return null;
+  const mine = function (code) { return !!code; };
   let book;
   try {
     book = SpreadsheetApp.openById(CHECKS_SHEET_ID);
@@ -451,6 +466,17 @@ function checksOf_(mine) {
   const main = checkRows_(book, CHECKS_TAB, Engine.CHECK_COLS.main, mine);
   const hasWh = CHECKS_WH_TAB && book.getSheets().some(function (s) { return text_(s.getName()) === CHECKS_WH_TAB; });
   return { main: main, wh: hasWh ? checkRows_(book, CHECKS_WH_TAB, Engine.CHECK_COLS.wh, mine) : null };
+}
+
+// The checks tabs from the snapshot, cut to the accounts in scope.
+function checksOf_(snap, mine) {
+  if (!snap.checks) return null;
+  const cut = function (rows) {
+    if (!rows) return null;
+    const code = rows[0].findIndex(function (h) { return text_(h) === 'كود العميل' || text_(h).slice(-' كود العميل'.length) === ' كود العميل'; });
+    return [rows[0]].concat(rows.slice(1).filter(function (r) { return mine(text_(r[code])); }));
+  };
+  return { main: cut(snap.checks.main), wh: cut(snap.checks.wh) };
 }
 
 function columnOf_(rows, names) {
@@ -471,10 +497,8 @@ function inScope_(who, warehouse) {
  * The analysis date always comes from the whole sheet.
  */
 function scopedSheets_(who, account) {
-  const book = sourceBook_();
-  const base = sourceRows_(book, BASE_TAB, Engine.BASE_COLS);
-  const tx = sourceRows_(book, TX_TAB, Engine.TX_COLS);
-  const analysisDay = Engine.lastMovementDay(tx);
+  const snap = snapshot_();
+  const base = snap.base, tx = snap.tx, analysisDay = snap.analysisDay;
   const baseAccount = columnOf_(base, Engine.BASE_COLS.account);
   const baseWarehouse = columnOf_(base, Engine.BASE_COLS.warehouse);
   const txAccount = columnOf_(tx, Engine.TX_COLS.account);
@@ -490,21 +514,123 @@ function scopedSheets_(who, account) {
   }));
   const txOut = wholeSheet ? tx : [tx[0]].concat(tx.slice(1).filter(function (r) { return allowed[text_(r[txAccount])]; }));
   const mine = function (code) { return !!code && (wholeSheet || allowed[code] === true); };
-  return { base: baseOut, tx: txOut, analysisDay: analysisDay, mine: mine };
+  return {
+    base: baseOut, tx: txOut, analysisDay: analysisDay, builtAt: snap.builtAt,
+    checks: checksOf_(snap, mine), checksError: snap.checksError || '',
+  };
+}
+
+/* ---- the data snapshot ---- */
+
+// The settings it was built from: changing a sheet id or tab name rebuilds it.
+function snapshotSource_() {
+  return [SOURCE_SHEET_ID, BASE_TAB, TX_TAB, CHECKS_SHEET_ID, CHECKS_TAB, CHECKS_WH_TAB].join('|');
+}
+
+function snapshotMeta_() {
+  return JSON.parse(PropertiesService.getScriptProperties().getProperty(SNAPSHOT_KEY) || 'null');
+}
+
+/** snapshot_ - the source data: the saved snapshot while fresh, else a new one. */
+function snapshot_() {
+  if (snapshotMemo_) return snapshotMemo_;
+  const meta = snapshotMeta_();
+  const usable = meta && meta.source === snapshotSource_();
+  const fresh = usable && Date.now() - meta.builtAt < SNAPSHOT_MAX_AGE;
+  // While another request rebuilds it, a stale snapshot is better than a second build.
+  const building = usable && CacheService.getScriptCache().get(SNAPSHOT_BUILDING);
+  if (fresh || building) {
+    try {
+      snapshotMemo_ = readSnapshotFile_(meta);
+      return snapshotMemo_;
+    } catch (e) {
+      console.warn('snapshot not read, rebuilding: ' + e.message);
+    }
+  }
+  return buildSnapshot_();
+}
+
+function buildSnapshot_() {
+  const cache = CacheService.getScriptCache();
+  cache.put(SNAPSHOT_BUILDING, '1', 5 * 60);
+  try {
+    const started = Date.now();
+    const book = sourceBook_();
+    const base = sourceRows_(book, BASE_TAB, Engine.BASE_COLS);
+    const tx = sourceRows_(book, TX_TAB, Engine.TX_COLS);
+    // The screens still work without the checks; a request is refused (see evaluate_).
+    let checks = null, checksError = '';
+    try {
+      checks = readChecks_();
+    } catch (e) {
+      checksError = e.message;
+    }
+    const snap = {
+      builtAt: Date.now(), base: base, tx: tx, checks: checks, checksError: checksError,
+      analysisDay: Engine.lastMovementDay(tx), buildMs: 0,
+    };
+    snap.buildMs = Date.now() - started;
+    saveSnapshotFile_(snap);
+    ensureTrigger_();
+    snapshotMemo_ = snap;
+    return snap;
+  } finally {
+    cache.remove(SNAPSHOT_BUILDING);
+  }
+}
+
+function saveSnapshotFile_(snap) {
+  const zipped = Utilities.gzip(Utilities.newBlob(JSON.stringify(snap), 'application/json', 'snapshot.json'));
+  const text = Utilities.base64Encode(zipped.getBytes());
+  const meta = snapshotMeta_();
+  let file = null;
+  if (meta && meta.fileId) {
+    try {
+      file = DriveApp.getFileById(meta.fileId);
+      if (file.isTrashed()) file = null;
+    } catch (e) {
+      file = null;  // deleted by hand: a new one is made
+    }
+  }
+  if (file) file.setContent(text);
+  else file = DriveApp.createFile(SNAPSHOT_NAME, text, MimeType.PLAIN_TEXT);
+  PropertiesService.getScriptProperties().setProperty(SNAPSHOT_KEY, JSON.stringify({
+    fileId: file.getId(), builtAt: snap.builtAt, buildMs: snap.buildMs, source: snapshotSource_(), size: text.length,
+  }));
+}
+
+function readSnapshotFile_(meta) {
+  const text = DriveApp.getFileById(meta.fileId).getBlob().getDataAsString();
+  const blob = Utilities.newBlob(Utilities.base64Decode(text), 'application/x-gzip', 'snapshot.json.gz');
+  return JSON.parse(Utilities.ungzip(blob).getDataAsString());
+}
+
+// The time trigger that keeps the snapshot fresh, made once.
+function ensureTrigger_() {
+  const has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'refreshSnapshot'; });
+  if (!has) ScriptApp.newTrigger('refreshSnapshot').timeBased().everyMinutes(SNAPSHOT_MINUTES).create();
+}
+
+/** refreshSnapshot - run by the time trigger. Can also be run once from the editor. */
+function refreshSnapshot() {
+  snapshotMemo_ = null;
+  buildSnapshot_();
+}
+
+function refresh_(who) {
+  snapshotMemo_ = null;
+  const snap = buildSnapshot_();
+  audit_(publicName_(who), 'تجهيز نسخة البيانات', Math.round(snap.buildMs / 1000) + ' ثانية');
+  return { builtAt: snap.builtAt, buildMs: snap.buildMs, checksError: snap.checksError };
 }
 
 function data_(who) {
   const started = Date.now();
   const sheets = scopedSheets_(who, '');
-  // The screens still work without the checks; the site shows why they are missing.
-  let checks = null, checksError = '';
-  try {
-    checks = checksOf_(sheets.mine);
-  } catch (e) {
-    checksError = e.message;
-  }
+  const checks = sheets.checks;
   return {
-    base: sheets.base, tx: sheets.tx, analysisDay: sheets.analysisDay, rules: rules_(), checks: checks, checksError: checksError,
+    base: sheets.base, tx: sheets.tx, analysisDay: sheets.analysisDay, rules: rules_(), checks: checks, checksError: sheets.checksError,
+    dataAt: sheets.builtAt,
     stats: {
       ms: Date.now() - started, customers: sheets.base.length - 1, movements: sheets.tx.length - 1,
       checks: checks ? checks.main.length - 1 + (checks.wh ? checks.wh.length - 1 : 0) : 0,
@@ -532,7 +658,9 @@ function evaluate_(who, account, amount) {
   const cache = CacheService.getScriptCache();
   // The scope and rules are part of the key, so two users never share a
   // customer they may not see, and changing the rules invalidates the result.
-  const key = EVAL_CACHE + ':' + sha_(account + '|' + who.warehouses.join(',') + '|' + JSON.stringify(rules));
+  // A new snapshot changes the key too, so a result never outlives its data.
+  const meta = snapshotMeta_();
+  const key = EVAL_CACHE + ':' + sha_(account + '|' + who.warehouses.join(',') + '|' + JSON.stringify(rules) + '|' + (meta ? meta.builtAt : ''));
   let c = null, analysisDay = 0;
   const hit = cache.get(key);
   if (hit) {
@@ -548,8 +676,8 @@ function evaluate_(who, account, amount) {
     const sheets = scopedSheets_(who, account);
     if (sheets.base.length < 2) throw new Error('العميل غير موجود في قاعدة العملاء أو خارج نطاق مخازنك: ' + account);
     // Unlike the screens, a request is never checked without the checks: a failure stops it.
-    const checks = checksOf_(sheets.mine);
-    c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, checks).customers[0];
+    if (sheets.checksError) throw new Error(sheets.checksError);
+    c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, sheets.checks).customers[0];
     analysisDay = sheets.analysisDay;
     try { cache.put(key, JSON.stringify({ c: slimCustomer_(c), day: analysisDay }), EVAL_TTL); } catch (e) { /* the cache is optional */ }
   }
@@ -637,24 +765,30 @@ function decide_(req, who) {
   requireDecider_(who, r);
   const check = evaluate_(who, text_(r.account), Number(r.amount));
   return locked_(function () {
+    // One read of the sheet, inside the lock so the status cannot change under us.
     const sh = requestsSheet_();
     const headers = headers_(sh);
-    const idCol = headers.indexOf(COLUMNS.id);
     const lastRow = sh.getLastRow();
-    for (let row = 2; row <= lastRow; row++) {
-      if (text_(sh.getRange(row, idCol + 1).getValue()) !== text_(req.id)) continue;
-      const current = text_(sh.getRange(row, headers.indexOf(COLUMNS.status) + 1).getValue());
-      if (current !== STATUS.pending) throw new Error('هذا الطلب لم يعد قيد الاعتماد: ' + current);
-      const put = function (field, value) { sh.getRange(row, headers.indexOf(COLUMNS[field]) + 1).setValue(value); };
-      put('status', decision);
-      put('approver', safe_(publicName_(who)));
-      put('decidedAt', now_());
-      put('decisionNote', safe_(req.note));
-      put('verdictAtDecision', check.verdictLabel + (check.reasons ? ': ' + safe_(check.reasons) : ''));
-      audit_(publicName_(who), decision, text_(req.id));
-      return rowToObject_(headers, sh.getRange(row, 1, 1, headers.length).getValues()[0]);
-    }
-    throw new Error('الطلب غير موجود: ' + text_(req.id));
+    const values = lastRow < 2 ? [] : sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const idCol = headers.indexOf(COLUMNS.id);
+    const at = values.findIndex(function (v) { return text_(v[idCol]) === text_(req.id); });
+    if (at < 0) throw new Error('الطلب غير موجود: ' + text_(req.id));
+    const current = text_(values[at][headers.indexOf(COLUMNS.status)]);
+    if (current !== STATUS.pending) throw new Error('هذا الطلب لم يعد قيد الاعتماد: ' + current);
+    const row = values[at].slice();
+    // Only these cells are written, so formulas in the user's own columns stay.
+    const put = function (field, value) {
+      const col = headers.indexOf(COLUMNS[field]);
+      sh.getRange(at + 2, col + 1).setValue(value);
+      row[col] = value;
+    };
+    put('status', decision);
+    put('approver', safe_(publicName_(who)));
+    put('decidedAt', now_());
+    put('decisionNote', safe_(req.note));
+    put('verdictAtDecision', check.verdictLabel + (check.reasons ? ': ' + safe_(check.reasons) : ''));
+    audit_(publicName_(who), decision, text_(req.id));
+    return rowToObject_(headers, row);
   });
 }
 

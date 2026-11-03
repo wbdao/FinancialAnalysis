@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const zlib = require('zlib');
 
 class FakeRange {
   constructor(sheet, row, col, rows, cols) { Object.assign(this, { sheet, row, col, rows, cols }); }
@@ -65,6 +66,40 @@ function fakeCache() {
   };
 }
 
+// Blobs as Apps Script hands them out: bytes are signed, strings are UTF-8.
+const signed = (buf) => [...buf].map((b) => (b > 127 ? b - 256 : b));
+const unsigned = (bytes) => Buffer.from(bytes.map((b) => b & 255));
+class FakeBlob {
+  constructor(buf) { this.buf = buf; }
+  getBytes() { return signed(this.buf); }
+  getDataAsString() { return this.buf.toString('utf8'); }
+}
+
+function fakeDrive() {
+  const files = new Map();
+  let next = 1;
+  const handle = (id) => {
+    const f = files.get(id);
+    if (!f) throw new Error('No item with the given ID could be found');
+    return {
+      getId: () => id,
+      isTrashed: () => f.trashed,
+      setTrashed: (v) => { f.trashed = v; },
+      setContent: (text) => { f.content = text; f.writes++; },
+      getBlob: () => new FakeBlob(Buffer.from(f.content, 'utf8')),
+    };
+  };
+  return {
+    files,
+    getFileById: handle,
+    createFile: (name, content) => {
+      const id = `FILE${next++}`;
+      files.set(id, { name, content, trashed: false, writes: 1 });
+      return handle(id);
+    },
+  };
+}
+
 /**
  * @param {{password?: string, sourceId?: string, source?: {base: Array, tx: Array},
  *     checksId?: string, checks?: {main: Array, wh?: Array}}} options checksId 'CHECKS' opens `checks`.
@@ -82,6 +117,14 @@ function loadScript(options = {}) {
   }
   const cache = fakeCache();
   const props = new Map();
+  const drive = fakeDrive();
+  const triggers = [];
+  // How often the source sheets were read: the snapshot should make this rare.
+  const reads = { source: 0 };
+  for (const sh of sourceBook.sheets.values()) {
+    const all = sh.getDataRange.bind(sh);
+    sh.getDataRange = () => { reads.source++; return all(); };
+  }
   const dir = path.join(__dirname, '..', 'apps-script');
   const code = fs.readFileSync(path.join(dir, 'Code.gs'), 'utf8')
     .replace(/const ADMIN_PASSWORD = '[^']*'/, `const ADMIN_PASSWORD = '${password}'`)
@@ -103,7 +146,20 @@ function loadScript(options = {}) {
       MimeType: { JSON: 'json' },
       createTextOutput: (text) => ({ text, setMimeType() { return this; } }),
     },
+    DriveApp: { getFileById: drive.getFileById, createFile: drive.createFile },
+    MimeType: { PLAIN_TEXT: 'text/plain' },
+    ScriptApp: {
+      getProjectTriggers: () => triggers.map((t) => ({ getHandlerFunction: () => t.handler })),
+      newTrigger: (handler) => ({
+        timeBased: () => ({ everyMinutes: (minutes) => ({ create: () => triggers.push({ handler, minutes }) }) }),
+      }),
+    },
     Utilities: {
+      newBlob: (data) => new FakeBlob(typeof data === 'string' ? Buffer.from(data, 'utf8') : unsigned(data)),
+      gzip: (blob) => new FakeBlob(zlib.gzipSync(blob.buf)),
+      ungzip: (blob) => new FakeBlob(zlib.gunzipSync(blob.buf)),
+      base64Encode: (bytes) => unsigned(bytes).toString('base64'),
+      base64Decode: (text) => signed(Buffer.from(text, 'base64')),
       formatDate: (d, tz, fmt) => (fmt === 'yyyy-MM-dd' ? d.toISOString().slice(0, 10) : d.toISOString().slice(0, 16).replace('T', ' ')),
       getUuid: () => crypto.randomUUID(),
       computeDigest: (alg, s) => [...crypto.createHash('sha256').update(s, 'utf8').digest()].map((b) => (b > 127 ? b - 256 : b)),
@@ -116,7 +172,9 @@ function loadScript(options = {}) {
   vm.runInContext(fs.readFileSync(path.join(dir, 'Engine.gs'), 'utf8'), context);
   vm.runInContext(code, context);
   const post = (body) => JSON.parse(vm.runInContext('doPost', context)({ postData: { contents: JSON.stringify(body) } }).text);
-  return { post, book, sourceBook, checksBook, props, cache };
+  // A run of a top-level function, as the time trigger or the editor does it.
+  const run = (name) => vm.runInContext(name, context)();
+  return { post, run, book, sourceBook, checksBook, props, cache, drive, triggers, reads };
 }
 
 module.exports = { loadScript, FakeSheet, REQUESTS: 'طلبات الفواتير', USERS: 'المستخدمين', LOG: 'سجل العمليات' };

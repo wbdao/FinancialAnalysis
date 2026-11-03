@@ -377,6 +377,113 @@ test('checks: without CHECKS_SHEET_ID nothing changes', () => {
   assert.strictEqual(s.call(s.admin, 'add', { account: 'B1', amount: 100 }).request.verdict, 'سليمة');
 });
 
+/* ---- the data snapshot ---- */
+
+const snapMeta = (s) => JSON.parse(s.props.get('snapshot'));
+const sourceReads = (s) => s.reads.source;  // each build reads the two customer tabs
+
+test('snapshot: the sheets are read once, then every action uses the saved copy', () => {
+  const s = setup();
+  const clerk = s.addUser('sara', 'موظف');
+  assert.ok(s.call(clerk, 'data').ok);
+  assert.strictEqual(sourceReads(s), 2);
+  const id = s.call(clerk, 'add', { account: 'A1', amount: 3000 }).request.id;
+  s.call(s.admin, 'recheck', { id });
+  s.call(s.admin, 'decide', { id, decision: 'approve' });
+  s.call(s.admin, 'data');
+  assert.strictEqual(sourceReads(s), 2);
+  assert.strictEqual(s.drive.files.size, 1);
+  assert.deepStrictEqual(s.triggers, [{ handler: 'refreshSnapshot', minutes: 15 }]);
+});
+
+test('snapshot: the saved copy gives the same answers as the sheets', () => {
+  const s = setup();
+  const first = s.call(s.admin, 'data');
+  const again = s.call(s.admin, 'data');
+  for (const k of ['base', 'tx', 'analysisDay', 'checks']) assert.deepStrictEqual(again[k], first[k], k);
+  assert.strictEqual(again.dataAt, first.dataAt);
+  assert.strictEqual(s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request.verdict, 'موقوفة');
+});
+
+test('snapshot: an old copy, a moved source or a deleted file is rebuilt', () => {
+  const s = setup();
+  s.call(s.admin, 'data');
+  const meta = snapMeta(s);
+  s.props.set('snapshot', JSON.stringify(Object.assign({}, meta, { builtAt: meta.builtAt - 31 * 60 * 1000 })));
+  s.call(s.admin, 'data');
+  assert.strictEqual(sourceReads(s), 4);
+  assert.strictEqual(s.drive.files.size, 1);  // the same file is rewritten
+
+  s.props.set('snapshot', JSON.stringify(Object.assign({}, snapMeta(s), { source: 'another sheet' })));
+  s.call(s.admin, 'data');
+  assert.strictEqual(sourceReads(s), 6);
+
+  s.drive.files.clear();
+  assert.ok(s.call(s.admin, 'data').ok);
+  assert.strictEqual(sourceReads(s), 8);
+  assert.strictEqual(s.drive.files.size, 1);
+});
+
+test('snapshot: while a rebuild runs, a stale copy is served instead of a second read', () => {
+  const s = setup();
+  s.call(s.admin, 'data');
+  const meta = snapMeta(s);
+  s.props.set('snapshot', JSON.stringify(Object.assign({}, meta, { builtAt: meta.builtAt - 60 * 60 * 1000 })));
+  s.cache.put('snapshot:building', '1');
+  assert.ok(s.call(s.admin, 'data').ok);
+  assert.strictEqual(sourceReads(s), 2);
+});
+
+test('snapshot: sheet edits appear after the trigger or the admin refresh, not before', () => {
+  const s = setup();
+  const clerk = s.addUser('sara', 'موظف');
+  assert.strictEqual(s.call(s.admin, 'data').base.length, 3);
+  s.sourceBook.getSheetByName('قاعده عملاء الشركه').grid.push(['C1', 'عميل جديد', 1000, 0, 0, 'Net30', 'م', '65', '', '']);
+  assert.strictEqual(s.call(s.admin, 'data').base.length, 3);
+  s.run('refreshSnapshot');
+  assert.strictEqual(s.call(s.admin, 'data').base.length, 4);
+
+  s.sourceBook.getSheetByName('قاعده عملاء الشركه').grid.pop();
+  assert.match(s.call(clerk, 'refresh').error, /للمدير فقط/);
+  const r = s.call(s.admin, 'refresh');
+  assert.ok(r.ok, r.error);
+  assert.ok(r.builtAt >= snapMeta(s).builtAt - 1);
+  assert.strictEqual(s.call(s.admin, 'data').base.length, 3);
+  assert.ok(JSON.stringify(s.book.getSheetByName(LOG).grid).includes('تجهيز نسخة البيانات'));
+});
+
+test('decide: one read of the requests sheet, however many requests there are', () => {
+  const s = setup();
+  const approver = s.addUser('amr', 'معتمد');
+  s.call(s.admin, 'add', { account: 'A1', amount: 3000 });
+  const sh = s.book.getSheetByName(REQUESTS);
+  const statusCol = sh.grid[0].indexOf('موقف الاعتماد');
+  const template = sh.grid[1];
+  for (let i = 2; i <= 2000; i++) sh.grid.push(template.map((v, k) => (k === 0 ? `REQ${String(i).padStart(6, '0')}` : v)));
+  const id = 'REQ002000';
+  let calls = 0;
+  const getRange = sh.getRange.bind(sh);
+  sh.getRange = (...a) => { calls++; return getRange(...a); };
+  const r = s.call(approver, 'decide', { id, decision: 'approve', note: 'تمام' });
+  assert.ok(r.ok, r.error);
+  assert.ok(calls < 20, `${calls} sheet calls`);
+  assert.strictEqual(sh.grid[2000][statusCol], 'معتمد');
+  assert.strictEqual(sh.grid[1999][statusCol], 'قيد الاعتماد');
+  assert.strictEqual(r.request.status, 'معتمد');
+  assert.strictEqual(r.request.decisionNote, 'تمام');
+});
+
+test('decide: a column of the user\'s own keeps its formula', () => {
+  const s = setup();
+  s.call(s.admin, 'add', { account: 'A1', amount: 3000 });
+  const sh = s.book.getSheetByName(REQUESTS);
+  const own = sh.grid[0].length;
+  sh.grid[0][own] = 'عمود خاص';
+  sh.grid[1][own] = '=1+1';
+  s.call(s.admin, 'decide', { id: 'REQ000001', decision: 'approve' });
+  assert.strictEqual(sh.grid[1][own], '=1+1');
+});
+
 test('a missing source link gives a clear message', () => {
   const s = loadScript({ sourceId: '', source: source() });
   const t = s.post({ action: 'login', username: 'admin', password: PASS }).token;

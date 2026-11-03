@@ -163,7 +163,7 @@
         version: CACHE_VERSION, tokenTag: tag, savedAt: Date.now(),
         user: state.user, rules: state.rules,
         base: state.sheets.base, tx: state.sheets.tx, analysisDay: state.sheets.analysisDay,
-        checks: state.sheets.checks, checksError: state.sheets.checksError,
+        checks: state.sheets.checks, checksError: state.sheets.checksError, dataAt: state.sheets.dataAt,
       }, CACHE_KEY));
     } catch (e) {
       console.warn('local cache save failed', e);
@@ -193,7 +193,7 @@
     setUser(user || snap.user);
     state.sheets = {
       base: snap.base, tx: snap.tx, analysisDay: snap.analysisDay,
-      checks: snap.checks || null, checksError: snap.checksError || '',
+      checks: snap.checks || null, checksError: snap.checksError || '', dataAt: snap.dataAt || null,
     };
     state.rules = Object.assign({}, Engine.DEFAULT_RULES, snap.rules || {});
     state.cacheSavedAt = snap.savedAt || 0;
@@ -295,7 +295,9 @@
     const { base, tx, analysisDay, checks } = state.sheets;
     state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
-    $('stamp').textContent = `المتأخرات حتى ${dateOf(state.result.analysisDay)}`;
+    const prepared = state.sheets.dataAt ? ` · البيانات من ${timeOf(state.sheets.dataAt)}` : '';
+    $('stamp').textContent = `المتأخرات حتى ${dateOf(state.result.analysisDay)}${prepared}`;
+    $('snapshotInfo').textContent = state.sheets.dataAt ? `آخر تجهيز: ${timeOf(state.sheets.dataAt)}` : '';
     const demoNote = state.isDemo ? 'هذه بيانات نموذجية للتجربة وليست بيانات حقيقية. ' : '';
     banner([cacheNote(), (demoNote + issuesText(state.result.issues)).trim()].filter(Boolean).join(' '));
     fillRepFilter();
@@ -311,7 +313,9 @@
     $('reload').disabled = true;
     try {
       const data = await callScript('data');
-      state.sheets = { base: data.base, tx: data.tx, analysisDay: data.analysisDay, checks: data.checks, checksError: data.checksError };
+      state.sheets = {
+        base: data.base, tx: data.tx, analysisDay: data.analysisDay, checks: data.checks, checksError: data.checksError, dataAt: data.dataAt || null,
+      };
       state.rules = data.rules;
       state.cacheSavedAt = null;
       console.info('data read', data.stats);
@@ -954,6 +958,28 @@
     }
   }
 
+  // The time the script prepared the data, in the viewer's own clock.
+  function timeOf(ms) {
+    const d = new Date(ms);
+    return `${d.toLocaleDateString('ar-EG-u-nu-latn')} ${d.toLocaleTimeString('ar-EG-u-nu-latn', { hour: '2-digit', minute: '2-digit' })}`;
+  }
+
+  async function refreshSnapshot(event) {
+    event.preventDefault();
+    $('snapshotSubmit').disabled = true;
+    formMessage($('snapshotMsg'), 'جارٍ قراءة الشيتات وتجهيز النسخة، وقد يستغرق ذلك دقيقة…');
+    try {
+      const data = await callScript('refresh');
+      const note = data.checksError ? ` الشيكات غير محسوبة: ${data.checksError}` : '';
+      formMessage($('snapshotMsg'), `تم التجهيز في ${Math.round(data.buildMs / 1000)} ثانية.${note}`, !!data.checksError);
+      await loadData();
+    } catch (e) {
+      formMessage($('snapshotMsg'), e.message, true);
+    } finally {
+      $('snapshotSubmit').disabled = false;
+    }
+  }
+
   async function saveRules(event) {
     event.preventDefault();
     try {
@@ -1046,6 +1072,7 @@
   });
   $('passwordForm').addEventListener('submit', changePassword);
   $('rulesForm').addEventListener('submit', saveRules);
+  $('snapshotForm').addEventListener('submit', refreshSnapshot);
   $('q').addEventListener('input', refilter);
   $('verdict').addEventListener('change', refilter);
   $('rep').addEventListener('change', refilter);

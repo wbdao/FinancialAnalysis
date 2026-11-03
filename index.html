@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body data-view="login">
 
@@ -353,6 +353,14 @@
               <p id="rulesMsg" role="alert"></p>
               <button type="submit" class="btn">حفظ القواعد</button>
             </form>
+
+            <form id="snapshotForm" class="panel form rules-form" data-admin hidden>
+              <h2>نسخة البيانات</h2>
+              <p class="muted">يقرأ السكربت شيت العملاء والحركات والشيكات كل 15 دقيقة، ويحفظ نسخة تقرأ منها كل العمليات بسرعة. جهّزها الآن بعد تعديل مهم في الشيت.</p>
+              <p id="snapshotInfo" class="muted"></p>
+              <p id="snapshotMsg" role="alert"></p>
+              <button type="submit" class="btn" id="snapshotSubmit">تجهيز البيانات الآن</button>
+            </form>
           </div>
         </section>
       </main>
@@ -383,8 +391,8 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=10"></script>
-  <script src="demo.js?v=10"></script>
-  <script src="app.js?v=10"></script>
+  <script src="engine.js?v=11"></script>
+  <script src="demo.js?v=11"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>
