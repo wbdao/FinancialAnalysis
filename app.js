@@ -51,7 +51,7 @@
   const state = {
     token: readToken(), user: null, sheets: null, rules: Engine.DEFAULT_RULES, isDemo: false, result: null,
     shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
-    decisionPending: false, decisionPreview: false, cacheSavedAt: null,
+    decisionPending: false, decisionPreview: false, decisionCanAct: false, cacheSavedAt: null,
     build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
     checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
   };
@@ -234,6 +234,7 @@
   function clearData() {
     Object.assign(state, {
       user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null,
+      deciding: null, decisionPending: false, decisionPreview: false, decisionCanAct: false,
       isDemo: false, cacheSavedAt: null, build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
       checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
     });
@@ -878,7 +879,7 @@
       <thead><tr><th>الطلب</th><th class="n">القيمة</th><th>الفحص</th><th>الحالة</th><th>التاريخ</th></tr></thead>
       <tbody>${list.slice(0, 20).map((r) => `
         <tr>
-          <td>${esc(r.id)}<span class="sub">${esc(r.requester || '')}</span></td>
+          <td><button type="button" class="link-btn" data-review-request="${esc(r.id)}">${esc(r.id)}</button><span class="sub">${esc(r.requester || '')}</span></td>
           <td class="n">${money(r.amount)}</td>
           <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span><span class="sub">${esc(r.reasons || '')}</span></td>
           <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
@@ -1048,8 +1049,10 @@
       return;
     }
     const own = (r) => state.user && String(r.requesterUser).toLowerCase() === state.user.username;
-    $('requestRows').innerHTML = shown.map((r) => `
-      <tr>
+    $('requestRows').innerHTML = shown.map((r) => {
+      const act = canDecide() && r.status === 'قيد الاعتماد' && (isAdmin() || !own(r));
+      return `
+      <tr tabindex="0" data-review="${esc(r.id)}">
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
         <td><button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button><span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
         <td class="n">${money(r.amount)}</td>
@@ -1059,8 +1062,9 @@
           ${r.approver ? `<span class="sub">${esc(r.approver)} · ${esc(r.decidedAt)}</span>` : ''}
           ${r.verdictAtDecision ? `<span class="sub">عند القرار: ${esc(r.verdictAtDecision)}</span>` : ''}
           ${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
-        <td>${canDecide() && r.status === 'قيد الاعتماد' && (isAdmin() || !own(r)) ? `<button type="button" class="ghost" data-id="${esc(r.id)}">قرار</button>` : ''}</td>
-      </tr>`).join('');
+        <td><button type="button" class="ghost" data-review="${esc(r.id)}">${act ? 'مراجعة' : 'عرض'}</button></td>
+      </tr>`;
+    }).join('');
   }
 
   function exportRequests() {
@@ -1169,17 +1173,110 @@
     $('decisionBusy').hidden = !text;
   }
 
-  async function openDecision(id) {
+  function requestCanAct(r) {
+    return !!r && r.status === 'قيد الاعتماد' && canDecide()
+      && (isAdmin() || String(r.requesterUser || '').toLowerCase() !== String(state.user.username || '').toLowerCase());
+  }
+
+  function reviewNotice(r) {
+    if (!r || r.status !== 'قيد الاعتماد') return '';
+    if (!canDecide()) return 'عرض فقط: لا تملك صلاحية اعتماد الطلبات.';
+    if (!isAdmin() && String(r.requesterUser || '').toLowerCase() === String(state.user.username || '').toLowerCase()) {
+      return 'عرض فقط: لا يمكنك اعتماد طلب سجلته بنفسك.';
+    }
+    return '';
+  }
+
+  function reviewFact(label, value) {
+    return value === '' || value == null ? '' : `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`;
+  }
+
+  function reviewNum(label, value) {
+    return value === '' || value == null ? '' : `<dt>${esc(label)}</dt><dd>${money(value)}</dd>`;
+  }
+
+  function reviewDetailsHtml(r) {
+    const notice = reviewNotice(r);
+    const c = customerByAccount(r.account);
+    const customer = c
+      ? `<button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button>`
+      : esc(r.customer);
+    const decision = r.status === 'قيد الاعتماد'
+      ? '<div class="review-note"><strong>القرار</strong>لم يُتخذ بعد.</div>'
+      : `<dl>
+          ${reviewFact('المعتمد', r.approver)}
+          ${reviewFact('وقت القرار', r.decidedAt)}
+          ${reviewFact('الفحص عند القرار', r.verdictAtDecision)}
+        </dl>
+        ${r.decisionNote ? `<div class="review-note"><strong>ملاحظة القرار</strong>${esc(r.decisionNote)}</div>` : ''}`;
+    return `
+      ${notice ? `<div class="review-notice">${esc(notice)}</div>` : ''}
+      <section class="review-block">
+        <h3>بيانات الطلب</h3>
+        <dl>
+          ${reviewFact('الرقم', r.id)}
+          ${reviewFact('التاريخ', r.createdAt)}
+          ${reviewFact('مقدم الطلب', r.requester)}
+          ${reviewNum('المبلغ', r.amount)}
+        </dl>
+        ${r.note ? `<div class="review-note"><strong>ملاحظة مقدم الطلب</strong>${esc(r.note)}</div>` : ''}
+      </section>
+      <section class="review-block">
+        <h3>العميل</h3>
+        <dl>
+          <dt>الاسم</dt><dd>${customer}</dd>
+          ${reviewFact('الكود', r.account)}
+          ${reviewFact('المندوب', r.rep)}
+          ${reviewFact('المخزن', r.warehouse)}
+          ${reviewFact('المجموعة', r.group)}
+        </dl>
+      </section>
+      <section class="review-block full">
+        <h3>الفحص عند التسجيل</h3>
+        <dl>
+          <dt>النتيجة</dt><dd><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict || '—')}</span></dd>
+          ${reviewFact('تاريخ البيانات', r.dataDate)}
+          ${reviewNum('الرصيد شامل الشيكات بعد الفاتورة', r.exposureAfter)}
+          ${reviewNum('حد الائتمان', r.creditLimit)}
+          ${reviewNum('الضمان', r.guarantee)}
+          ${reviewNum('المتأخرات', r.overdue)}
+          ${reviewNum('شيكات مرفوضة', r.checksRejected)}
+        </dl>
+        <div class="review-note"><strong>أسباب الفحص</strong>${r.reasons ? esc(r.reasons) : 'لا توجد ملاحظات.'}</div>
+      </section>
+      <section class="review-block full">
+        <h3>القرار</h3>
+        ${decision}
+      </section>`;
+  }
+
+  async function openRequest(id) {
     const r = state.requests.find((x) => x.id === id);
     if (!r) return;
     state.deciding = r;
     state.decisionPending = false;
-    $('decisionTitle').textContent = `قرار الطلب ${r.id}`;
-    $('decisionInfo').textContent = `${r.customer} · ${money(r.amount)} · عند التسجيل: ${r.verdict}`;
+    state.decisionCanAct = requestCanAct(r);
+    state.decisionPreview = false;
+    const pending = r.status === 'قيد الاعتماد';
+    const status = r.status ? `<span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>` : '';
+    $('decisionTitle').textContent = `${pending && state.decisionCanAct ? 'مراجعة الطلب' : 'تفاصيل الطلب'} ${r.id}`;
+    $('decisionInfo').innerHTML = `${status}<span>${esc(r.customer)} · ${money(r.amount)}</span><span>${esc(r.createdAt)}</span>`;
+    $('decisionDetails').innerHTML = reviewDetailsHtml(r);
     $('decisionNote').value = '';
     $('decisionError').hidden = true;
     $('decisionRetry').hidden = true;
+    $('decisionNoteWrap').hidden = !state.decisionCanAct;
+    $('decisionCurrentSection').hidden = !state.decisionCanAct;
+    $('approve').hidden = !state.decisionCanAct;
+    $('reject').hidden = !state.decisionCanAct;
     $('approve').disabled = $('reject').disabled = true;
+    $('decision').showModal();
+    $('decision').scrollTop = 0;
+    if (!state.decisionCanAct) {
+      setBusy('');
+      $('decisionCurrent').innerHTML = '';
+      return;
+    }
     const preview = previewCheck(r);
     state.decisionPreview = !!preview;
     $('decisionCurrent').innerHTML = preview
@@ -1189,7 +1286,6 @@
     // request before writing it, and the refresh below only adds live detail.
     if (preview) $('approve').disabled = $('reject').disabled = false;
     setBusy(preview ? 'يتم تحديث الموقف في الخلفية…' : 'جارٍ التحقق من الطلب بالبيانات الحالية…');
-    $('decision').showModal();
     await loadDecisionCheck(r);
   }
 
@@ -1231,6 +1327,7 @@
       setBusy('');
       $('decision').close();
       renderRequests();
+      if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
     } catch (e) {
       state.decisionPending = false;
       setBusy('');
@@ -1448,8 +1545,13 @@
   $('requestRows').addEventListener('click', (e) => {
     const link = e.target.closest('button[data-account]');
     if (link) { openCustomer(link.dataset.account, 'requests'); return; }
-    const b = e.target.closest('button[data-id]');
-    if (b) openDecision(b.dataset.id);
+    const review = e.target.closest('[data-review]');
+    if (review) openRequest(review.dataset.review);
+  });
+  $('requestRows').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const row = e.target.closest('tr[data-review]');
+    if (row && e.target === row) openRequest(row.dataset.review);
   });
   for (const id of ['checkStatus', 'checkSource', 'checkSort']) {
     $(id).addEventListener('change', () => { state.checkShown = CHECK_PAGE; renderChecks(); });
@@ -1467,6 +1569,8 @@
   });
   $('customerBody').addEventListener('click', (e) => {
     if (e.target.closest('[data-back]')) { show(state.customerFrom || 'invoices'); return; }
+    const req = e.target.closest('[data-review-request]');
+    if (req) { openRequest(req.dataset.reviewRequest); return; }
     const check = e.target.closest('[data-check-customer]');
     if (check) {
       const c = customerByAccount(check.dataset.checkCustomer);
@@ -1492,9 +1596,22 @@
   $('auditExport').addEventListener('click', exportAudit);
   $('approve').addEventListener('click', () => decide('approve'));
   $('reject').addEventListener('click', () => decide('reject'));
-  $('decisionRetry').addEventListener('click', () => { if (state.deciding) loadDecisionCheck(state.deciding); });
+  $('decisionRetry').addEventListener('click', () => { if (state.deciding && state.decisionCanAct) loadDecisionCheck(state.deciding); });
   $('decisionClose').addEventListener('click', () => $('decision').close());
-  $('decision').addEventListener('close', () => { setBusy(''); state.deciding = null; state.decisionPending = false; state.decisionPreview = false; });
+  $('decisionDetails').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-account]');
+    if (!b) return;
+    const from = document.body.dataset.view === 'customer' ? state.customerFrom : 'requests';
+    $('decision').close();
+    openCustomer(b.dataset.account, from);
+  });
+  $('decision').addEventListener('close', () => {
+    setBusy('');
+    state.deciding = null;
+    state.decisionPending = false;
+    state.decisionPreview = false;
+    state.decisionCanAct = false;
+  });
   $('userForm').addEventListener('submit', saveUser);
   $('userClear').addEventListener('click', clearUserForm);
   $('userRows').addEventListener('click', (e) => {
@@ -1523,7 +1640,9 @@
     openRow(e.target.closest('tr'));
   });
   $('rows').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') openRow(e.target.closest('tr'));
+    if (e.key !== 'Enter') return;
+    const row = e.target.closest('tr');
+    if (row && e.target === row) openRow(row);
   });
   $('detailBody').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-account]');

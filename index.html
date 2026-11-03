@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=13">
+  <link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body data-view="login">
 
@@ -510,12 +510,16 @@
 
   <dialog id="decision" aria-labelledby="decisionTitle">
     <h2 id="decisionTitle"></h2>
-    <p id="decisionInfo" class="muted"></p>
-    <div id="decisionCurrent" class="note-box" aria-live="polite"></div>
+    <p id="decisionInfo" class="review-meta"></p>
+    <div id="decisionDetails" class="review-details"></div>
+    <div id="decisionCurrentSection">
+      <h3>الفحص الحالي</h3>
+      <div id="decisionCurrent" class="note-box" aria-live="polite"></div>
+    </div>
     <p id="decisionBusy" class="busy" role="status" hidden>
       <span class="spinner" aria-hidden="true"></span><span id="decisionBusyText"></span>
     </p>
-    <label>ملاحظات الاعتماد
+    <label id="decisionNoteWrap">ملاحظات القرار (سبب الرفض مطلوب)
       <textarea id="decisionNote" rows="3"></textarea>
     </label>
     <p id="decisionError" class="form-error" role="alert" hidden></p>
@@ -523,12 +527,12 @@
       <button type="button" id="approve" class="btn">اعتماد</button>
       <button type="button" id="reject" class="btn danger">رفض</button>
       <button type="button" id="decisionRetry" class="btn ghost" hidden>إعادة المحاولة</button>
-      <button type="button" id="decisionClose" class="btn ghost">إلغاء</button>
+      <button type="button" id="decisionClose" class="btn ghost">إغلاق</button>
     </div>
   </dialog>
 
-  <script src="engine.js?v=13"></script>
-  <script src="demo.js?v=13"></script>
-  <script src="app.js?v=13"></script>
+  <script src="engine.js?v=14"></script>
+  <script src="demo.js?v=14"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
