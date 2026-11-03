@@ -766,6 +766,7 @@ td.date, .n { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .users-table table { min-width: 820px; }
 #view-requests table { min-width: 940px; }
+#view-audit table { min-width: 720px; }
 
 /* ---- tags & notes -------------------------------------------------------- */
 

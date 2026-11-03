@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=11">
+  <link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body data-view="login">
 
@@ -61,6 +61,9 @@
         <button type="button" data-view="users" data-admin hidden>
           <svg class="icon"><use href="#i-users"></use></svg><span>المستخدمون</span>
         </button>
+        <button type="button" data-view="audit" data-admin hidden>
+          <svg class="icon"><use href="#i-clock"></use></svg><span>سجل العمليات</span>
+        </button>
         <button type="button" data-view="settings">
           <svg class="icon"><use href="#i-settings"></use></svg><span>الإعدادات</span>
         </button>
@@ -77,7 +80,7 @@
             <svg class="icon"><use href="#i-logout"></use></svg>
           </button>
         </div>
-        <p class="sidebar-note">البيانات تُقرأ من الشيت مباشرة ولا تُحفظ على الجهاز.</p>
+        <p class="sidebar-note">تُحفظ آخر نسخة على هذا الجهاز لمدة 24 ساعة لتسريع الفتح، وتُمسح عند الخروج.</p>
       </div>
     </aside>
 
@@ -242,20 +245,39 @@
                 <p id="requestsCount" class="muted" aria-live="polite"></p>
               </div>
               <div class="actions">
-                <label class="field compact">موقف الاعتماد
-                  <select id="requestStatus">
-                    <option value="قيد الاعتماد">قيد الاعتماد</option>
-                    <option value="معتمد">معتمد</option>
-                    <option value="مرفوض">مرفوض</option>
-                    <option value="لا يحتاج اعتماد">لا يحتاج اعتماد</option>
-                    <option value="">الكل</option>
-                  </select>
-                </label>
+                <button type="button" id="requestsExport" class="btn ghost">
+                  <svg class="icon"><use href="#i-download"></use></svg><span>تصدير CSV</span>
+                </button>
                 <button type="button" id="requestsReload" class="btn ghost">
                   <svg class="icon"><use href="#i-refresh"></use></svg><span>تحديث</span>
                 </button>
               </div>
             </div>
+
+            <div class="filters">
+              <label class="field grow">بحث
+                <span class="input-wrap">
+                  <svg class="icon"><use href="#i-search"></use></svg>
+                  <input id="requestQuery" type="search" placeholder="رقم الطلب أو العميل أو الكود أو مقدم الطلب" autocomplete="off">
+                </span>
+              </label>
+              <label class="field compact">موقف الاعتماد
+                <select id="requestStatus">
+                  <option value="قيد الاعتماد">قيد الاعتماد</option>
+                  <option value="معتمد">معتمد</option>
+                  <option value="مرفوض">مرفوض</option>
+                  <option value="لا يحتاج اعتماد">لا يحتاج اعتماد</option>
+                  <option value="">الكل</option>
+                </select>
+              </label>
+              <label class="field compact">من تاريخ
+                <input id="requestFrom" type="date">
+              </label>
+              <label class="field compact">إلى تاريخ
+                <input id="requestTo" type="date">
+              </label>
+            </div>
+
             <div class="table-wrap">
               <table>
                 <thead>
@@ -265,6 +287,51 @@
                   </tr>
                 </thead>
                 <tbody id="requestRows"></tbody>
+              </table>
+            </div>
+            <button type="button" id="requestsMore" class="btn ghost more" hidden>عرض المزيد</button>
+          </section>
+        </section>
+
+        <section id="view-audit" hidden>
+          <section class="card table-card">
+            <div class="card-head">
+              <div>
+                <h2>سجل العمليات</h2>
+                <p id="auditCount" class="muted" aria-live="polite"></p>
+              </div>
+              <div class="actions">
+                <button type="button" id="auditExport" class="btn ghost">
+                  <svg class="icon"><use href="#i-download"></use></svg><span>تصدير CSV</span>
+                </button>
+                <button type="button" id="auditReload" class="btn ghost">
+                  <svg class="icon"><use href="#i-refresh"></use></svg><span>تحديث</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="filters">
+              <label class="field grow">المستخدم
+                <span class="input-wrap">
+                  <svg class="icon"><use href="#i-search"></use></svg>
+                  <input id="auditUser" type="search" placeholder="اسم المنفذ" autocomplete="off">
+                </span>
+              </label>
+              <label class="field compact">العملية
+                <select id="auditAction"><option value="">كل العمليات</option></select>
+              </label>
+              <label class="field compact">من تاريخ
+                <input id="auditFrom" type="date">
+              </label>
+              <label class="field compact">إلى تاريخ
+                <input id="auditTo" type="date">
+              </label>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>الوقت</th><th>المستخدم</th><th>العملية</th><th>التفاصيل</th></tr></thead>
+                <tbody id="auditRows"></tbody>
               </table>
             </div>
           </section>
@@ -358,6 +425,7 @@
               <h2>نسخة البيانات</h2>
               <p class="muted">يقرأ السكربت شيت العملاء والحركات والشيكات كل 15 دقيقة، ويحفظ نسخة تقرأ منها كل العمليات بسرعة. جهّزها الآن بعد تعديل مهم في الشيت.</p>
               <p id="snapshotInfo" class="muted"></p>
+              <p class="muted">إصدار الخادم: <b id="serverBuild" dir="ltr">—</b></p>
               <p id="snapshotMsg" role="alert"></p>
               <button type="submit" class="btn" id="snapshotSubmit">تجهيز البيانات الآن</button>
             </form>
@@ -391,8 +459,8 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=11"></script>
-  <script src="demo.js?v=11"></script>
-  <script src="app.js?v=11"></script>
+  <script src="engine.js?v=12"></script>
+  <script src="demo.js?v=12"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

@@ -12,6 +12,7 @@
   const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyhTT5bBIGue4Kbqs2VAuR39us1cUqNFIHPE9DJpnh77vZjM3bmZb74HgMFh67aG0Q/exec';
   const TOKEN_KEY = 'financialAnalysis.token';
   const PAGE_SIZE = 300;
+  const REQUEST_PAGE = 100;
   const STATUS_TAG = { 'قيد الاعتماد': 'warn', 'معتمد': 'ok', 'مرفوض': 'stop', 'لا يحتاج اعتماد': 'paid' };
   const VERDICT_TAG = { 'سليمة': 'ok', 'تحتاج موافقة': 'warn', 'موقوفة': 'stop' };
   const VERDICT = { ok: 'منتظمة', warn: 'تحتاج متابعة', stop: 'حرجة', paid: 'مسددة' };
@@ -35,6 +36,7 @@
     check: ['فحص فاتورة جديدة', 'قرار سريع قبل إصدار الفاتورة'],
     requests: ['الطلبات والاعتمادات', 'متابعة الطلبات وقرارات الاعتماد'],
     users: ['المستخدمون', 'إدارة الحسابات والصلاحيات ونطاق المخازن'],
+    audit: ['سجل العمليات', 'كل دخول وقرار وتغيير، مع الوقت والمنفذ'],
     settings: ['الإعدادات', 'كلمة المرور وقواعد التحليل'],
   };
 
@@ -47,6 +49,7 @@
     token: readToken(), user: null, sheets: null, rules: Engine.DEFAULT_RULES, isDemo: false, result: null,
     shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
     decisionPending: false, decisionPreview: false, cacheSavedAt: null,
+    build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -93,7 +96,15 @@
       throw new Error(data.error || 'تعذّر تنفيذ الطلب.');
     }
     if (data.user) setUser(data.user);
+    if (data.build) state.build = data.build;
+    showBuild();
     return data;
+  }
+
+  // The server build is shown in the settings, so a stale deployment is visible.
+  function showBuild() {
+    const el = $('serverBuild');
+    if (el) el.textContent = state.build || '—';
   }
 
   /* ---- local snapshot (IndexedDB) ------------------------------------------- */
@@ -160,7 +171,7 @@
       const tag = await tokenTag();
       if (!tag) return;
       await cacheRequest('readwrite', (store) => store.put({
-        version: CACHE_VERSION, tokenTag: tag, savedAt: Date.now(),
+        version: CACHE_VERSION, tokenTag: tag, savedAt: Date.now(), build: state.build,
         user: state.user, rules: state.rules,
         base: state.sheets.base, tx: state.sheets.tx, analysisDay: state.sheets.analysisDay,
         checks: state.sheets.checks, checksError: state.sheets.checksError, dataAt: state.sheets.dataAt,
@@ -191,6 +202,8 @@
   function applyCache(snap, user) {
     state.isDemo = false;
     setUser(user || snap.user);
+    state.build = snap.build || state.build;
+    showBuild();
     state.sheets = {
       base: snap.base, tx: snap.tx, analysisDay: snap.analysisDay,
       checks: snap.checks || null, checksError: snap.checksError || '', dataAt: snap.dataAt || null,
@@ -215,8 +228,13 @@
   }
 
   function clearData() {
-    Object.assign(state, { user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null, isDemo: false, cacheSavedAt: null });
-    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList']) $(id).innerHTML = '';
+    Object.assign(state, {
+      user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null,
+      isDemo: false, cacheSavedAt: null, build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
+    });
+    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount']) $(id).innerHTML = '';
+    $('requestsMore').hidden = true;
+    showBuild();
     $('userAvatar').textContent = '؟';
     document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = true; });
     $('stamp').textContent = 'الائتمان والضمان والمتأخرات';
@@ -317,6 +335,7 @@
         base: data.base, tx: data.tx, analysisDay: data.analysisDay, checks: data.checks, checksError: data.checksError, dataAt: data.dataAt || null,
       };
       state.rules = data.rules;
+      state.build = data.build || state.build;
       state.cacheSavedAt = null;
       console.info('data read', data.stats);
       recompute();
@@ -340,7 +359,7 @@
     let ping;
     try {
       const data = await callScript('ping');
-      ping = { user: data.user || state.user, rules: data.rules || state.rules };
+      ping = { user: data.user || state.user, rules: data.rules || state.rules, build: data.build || '' };
     } catch (e) {
       if (!state.token) return;  // the session ended; signedOut already ran
       if (cached) {
@@ -354,6 +373,7 @@
       return;
     }
     if (!cached) { await loadData(); return; }
+    if (cached.build && ping.build && cached.build !== ping.build) { await loadData(); return; }
     if (scopeOf(cached.user) !== scopeOf(ping.user)) { await loadData(); return; }
     if (ruleKey(cached.rules) !== ruleKey(ping.rules)) { await loadData(); return; }
     applyCache(cached, ping.user);
@@ -378,7 +398,7 @@
   /* ---- navigation ------------------------------------------------------------- */
 
   function show(view) {
-    for (const name of ['login', 'invoices', 'check', 'requests', 'users', 'settings']) $(`view-${name}`).hidden = name !== view;
+    for (const name of ['login', 'invoices', 'check', 'requests', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
     document.querySelectorAll('.tabs button').forEach((b) => {
       if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
@@ -727,28 +747,56 @@
     try {
       const data = await callScript('list');
       state.requests = data.requests;
+      state.requestShown = REQUEST_PAGE;
       renderRequests();
     } catch (e) {
       state.requests = [];
       $('requestRows').innerHTML = '';
+      $('requestsMore').hidden = true;
       $('requestsCount').textContent = e.message;
     } finally {
       $('requestsReload').disabled = false;
     }
   }
 
+  function requestFilters() {
+    return {
+      status: $('requestStatus').value,
+      from: $('requestFrom').value,
+      to: $('requestTo').value,
+      q: $('requestQuery').value.trim().toLowerCase(),
+    };
+  }
+
+  function requestMatches(r, f) {
+    if (f.status && r.status !== f.status) return false;
+    const day = String(r.createdAt || '').slice(0, 10);
+    if (f.from && day < f.from) return false;
+    if (f.to && day > f.to) return false;
+    if (!f.q) return true;
+    return [r.id, r.customer, r.account, r.rep, r.requester, r.note]
+      .some((v) => String(v == null ? '' : v).toLowerCase().includes(f.q));
+  }
+
+  // Newest first, then the active filters. The page size only limits drawing.
+  function filteredRequests() {
+    const f = requestFilters();
+    return state.requests.filter((r) => requestMatches(r, f)).reverse();
+  }
+
   function renderRequests() {
-    const status = $('requestStatus').value;
-    const list = state.requests.filter((r) => !status || r.status === status).reverse();
+    const list = filteredRequests();
     const pending = state.requests.filter((r) => r.status === 'قيد الاعتماد');
     const pendingTotal = pending.reduce((s, r) => s + Number(r.amount), 0);
     $('requestsCount').innerHTML = `<span class="chip">${money(list.length)} طلب</span><span class="chip warn">قيد الاعتماد ${money(pending.length)} · ${money(pendingTotal)}</span>`;
+    const shown = list.slice(0, state.requestShown);
+    $('requestsMore').hidden = shown.length >= list.length;
     if (!list.length) {
       $('requestRows').innerHTML = '<tr><td colspan="7" class="empty">لا توجد طلبات مطابقة.</td></tr>';
       return;
     }
     const own = (r) => state.user && String(r.requesterUser).toLowerCase() === state.user.username;
-    $('requestRows').innerHTML = list.map((r) => `
+    $('requestRows').innerHTML = shown.map((r) => `
       <tr>
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
         <td>${esc(r.customer)}<span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
@@ -761,6 +809,81 @@
           ${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
         <td>${canDecide() && r.status === 'قيد الاعتماد' && (isAdmin() || !own(r)) ? `<button type="button" class="ghost" data-id="${esc(r.id)}">قرار</button>` : ''}</td>
       </tr>`).join('');
+  }
+
+  function exportRequests() {
+    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة', 'الفحص', 'الأسباب', 'الحالة', 'مقدم الطلب', 'تاريخ الطلب', 'المعتمد', 'تاريخ الاعتماد', 'ملاحظات القرار', 'ملاحظة الطلب'];
+    const rows = filteredRequests().map((r) => [
+      r.id, r.customer, r.account, r.rep, Math.round(Number(r.amount) || 0), r.verdict, r.reasons || '',
+      r.status, r.requester, r.createdAt, r.approver || '', r.decidedAt || '', r.decisionNote || '', r.note || '',
+    ]);
+    downloadCsv(`الطلبات-${new Date().toISOString().slice(0, 10)}.csv`, header, rows);
+  }
+
+  /* ---- audit log (admin) ------------------------------------------------------- */
+
+  let auditSeq = 0;
+
+  async function loadAudit() {
+    const seq = ++auditSeq;
+    $('auditReload').disabled = true;
+    $('auditCount').textContent = 'جارٍ قراءة السجل…';
+    try {
+      const data = await callScript('audit', {
+        from: $('auditFrom').value, to: $('auditTo').value,
+        user: $('auditUser').value.trim(), op: $('auditAction').value,
+      });
+      if (seq !== auditSeq) return;  // a newer filter is already loading
+      state.audit = data.audit.entries;
+      state.auditTotal = data.audit.total;
+      fillAuditActions(data.audit.actions);
+      renderAudit();
+    } catch (e) {
+      if (seq !== auditSeq) return;
+      state.audit = [];
+      state.auditTotal = 0;
+      $('auditCount').textContent = '';
+      $('auditRows').innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;
+    } finally {
+      if (seq === auditSeq) $('auditReload').disabled = false;
+    }
+  }
+
+  // The menu keeps every operation the log holds, not just the filtered ones.
+  function fillAuditActions(actions) {
+    const el = $('auditAction');
+    const current = el.value;
+    el.innerHTML = '<option value="">كل العمليات</option>' + (actions || []).map((a) => `<option>${esc(a)}</option>`).join('');
+    if ((actions || []).includes(current)) el.value = current;
+  }
+
+  function auditTag(action) {
+    if (action === 'دخول' || action === 'معتمد') return 'ok';
+    if (action === 'مرفوض') return 'stop';
+    if (action === 'تسجيل طلب') return 'warn';
+    return 'paid';
+  }
+
+  function renderAudit() {
+    $('auditCount').innerHTML = `<span class="chip">${money(state.auditTotal)} عملية</span>` +
+      (state.auditTotal > state.audit.length ? `<span class="chip warn">المعروض أحدث ${money(state.audit.length)}</span>` : '');
+    if (!state.audit.length) {
+      $('auditRows').innerHTML = '<tr><td colspan="4" class="empty">لا توجد عمليات مطابقة.</td></tr>';
+      return;
+    }
+    $('auditRows').innerHTML = state.audit.map((e) => `
+      <tr>
+        <td dir="ltr" class="start">${esc(e.at)}</td>
+        <td>${esc(e.user)}</td>
+        <td><span class="tag ${auditTag(e.action)}">${esc(e.action)}</span></td>
+        <td>${esc(e.detail)}</td>
+      </tr>`).join('');
+  }
+
+  function exportAudit() {
+    downloadCsv(`سجل-العمليات-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['الوقت', 'المستخدم', 'العملية', 'التفاصيل'],
+      state.audit.map((e) => [e.at, e.user, e.action, e.detail]));
   }
 
   const VERDICT_LABEL = { ok: 'سليمة', warn: 'تحتاج موافقة', stop: 'موقوفة' };
@@ -996,6 +1119,21 @@
 
   /* ---- CSV export --------------------------------------------------------------- */
 
+  function downloadCsv(filename, header, rows) {
+    const cell = (v) => {
+      // A leading = + - @ would run as a formula when the file opens in Excel.
+      const s = typeof v === 'string' && /^[=+\-@]/.test(v) ? `'${v}` : String(v);
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+    const csv = [header, ...rows].map((r) => r.map(cell).join(',')).join('\r\n');
+    const url = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   function exportCsv() {
     const header = ['الفاتورة', 'النوع', 'كود العميل', 'العميل', 'المندوب', 'التاريخ', 'الاستحقاق', 'القيمة', 'المسدد', 'المتبقي', 'أيام التأخير', 'الائتمان', 'الضمان', 'غير المغطى', 'المتأخرات', 'الموقف'];
     const rows = state.filtered.map((i) => [
@@ -1003,18 +1141,7 @@
       Math.round(i.amount), Math.round(i.paid), Math.round(i.remaining), i.overdueDays,
       i.checks.credit.label, i.checks.guarantee.label, Math.round(i.uncovered), i.checks.arrears.label, VERDICT[i.verdict],
     ]);
-    const cell = (v) => {
-      // A leading = + - @ would run as a formula when the file opens in Excel.
-      const s = typeof v === 'string' && /^[=+\-@]/.test(v) ? `'${v}` : String(v);
-      return `"${s.replace(/"/g, '""')}"`;
-    };
-    const csv = [header, ...rows].map((r) => r.map(cell).join(',')).join('\r\n');
-    const url = URL.createObjectURL(new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `موقف-الفواتير-${dateOf(state.result.analysisDay)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(`موقف-الفواتير-${dateOf(state.result.analysisDay)}.csv`, header, rows);
   }
 
   /* ---- events ------------------------------------------------------------------- */
@@ -1032,6 +1159,7 @@
     show(b.dataset.view);
     if (b.dataset.view === 'requests') loadRequests();
     if (b.dataset.view === 'users') loadUsers();
+    if (b.dataset.view === 'audit') loadAudit();
   }));
   $('themeToggle').addEventListener('click', () => {
     const explicit = document.documentElement.dataset.theme;
@@ -1053,12 +1181,32 @@
   $('logout').addEventListener('click', logout);
   $('demo').addEventListener('click', loadDemo);
   $('reload').addEventListener('click', () => (state.isDemo ? loadDemo() : loadData()));
-  $('requestStatus').addEventListener('change', renderRequests);
+  for (const id of ['requestStatus', 'requestFrom', 'requestTo', 'requestQuery']) {
+    $(id).addEventListener(id === 'requestQuery' ? 'input' : 'change', () => {
+      state.requestShown = REQUEST_PAGE;
+      renderRequests();
+    });
+  }
+  $('requestsMore').addEventListener('click', () => {
+    state.requestShown += REQUEST_PAGE;
+    renderRequests();
+  });
   $('requestsReload').addEventListener('click', loadRequests);
+  $('requestsExport').addEventListener('click', exportRequests);
   $('requestRows').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-id]');
     if (b) openDecision(b.dataset.id);
   });
+  for (const id of ['auditFrom', 'auditTo', 'auditAction']) {
+    $(id).addEventListener('change', loadAudit);
+  }
+  let auditTimer = null;
+  $('auditUser').addEventListener('input', () => {
+    clearTimeout(auditTimer);
+    auditTimer = setTimeout(loadAudit, 350);
+  });
+  $('auditReload').addEventListener('click', loadAudit);
+  $('auditExport').addEventListener('click', exportAudit);
   $('approve').addEventListener('click', () => decide('approve'));
   $('reject').addEventListener('click', () => decide('reject'));
   $('decisionRetry').addEventListener('click', () => { if (state.deciding) loadDecisionCheck(state.deciding); });

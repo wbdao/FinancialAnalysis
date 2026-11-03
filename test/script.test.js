@@ -58,7 +58,7 @@ test('the placeholder admin password refuses every request', () => {
 
 test('every action but login needs a session', () => {
   const s = setup();
-  for (const action of ['data', 'ping', 'list', 'add', 'users', 'decide']) {
+  for (const action of ['data', 'ping', 'list', 'add', 'users', 'audit', 'decide']) {
     const r = s.post({ action, token: 'made-up' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.login, true);
@@ -203,6 +203,8 @@ test('ping: a fast session check that carries the current rules', () => {
   assert.ok(r.ok, r.error);
   assert.strictEqual(r.user.role, 'معتمد');
   assert.deepStrictEqual(r.rules, s.call(s.admin, 'data').rules);
+  assert.ok(r.build);
+  assert.strictEqual(typeof r.dataAt, 'number');
   assert.strictEqual(r.base, undefined);
   assert.strictEqual(r.tx, undefined);
 });
@@ -269,6 +271,43 @@ test('decisions and user changes reach the log, without passwords', () => {
   const log = JSON.stringify(s.book.getSheetByName(LOG).grid);
   assert.ok(log.includes('إضافة مستخدم') && log.includes('معتمد') && log.includes(id));
   assert.ok(!log.includes('password-1'));
+});
+
+test('audit: the admin reads the log newest first, with optional filters', () => {
+  const s = setup();
+  const t = s.addUser('amr', 'معتمد');
+  const id = s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request.id;
+  s.call(s.admin, 'decide', { id, decision: 'approve' });
+
+  const all = s.call(s.admin, 'audit');
+  assert.ok(all.ok, all.error);
+  assert.strictEqual(all.audit.total, all.audit.entries.length);
+  const at = all.audit.entries.map((e) => e.at);
+  assert.deepStrictEqual(at, at.slice().sort().reverse());
+  assert.ok(all.audit.entries.some((e) => e.action === 'تسجيل طلب' && e.detail.includes(id)));
+  assert.ok(all.audit.entries.some((e) => e.action === 'معتمد' && e.detail.includes(id)));
+  assert.ok(all.audit.actions.includes('دخول') && all.audit.actions.includes('معتمد'));
+  assert.ok(!JSON.stringify(all.audit).includes('password-1'));
+
+  const approved = s.call(s.admin, 'audit', { op: 'معتمد' });
+  assert.ok(approved.audit.entries.length >= 1);
+  assert.ok(approved.audit.entries.every((e) => e.action === 'معتمد'));
+
+  const byAdmin = s.call(s.admin, 'audit', { user: 'المدير' });
+  assert.ok(byAdmin.audit.entries.length >= 1);
+  assert.ok(byAdmin.audit.entries.every((e) => e.user.includes('المدير')));
+
+  // The menu always lists every operation, even when a filter is active.
+  assert.ok(byAdmin.audit.actions.includes('دخول'));
+
+  assert.strictEqual(s.call(s.admin, 'audit', { from: '2999-01-01' }).audit.total, 0);
+  assert.strictEqual(s.call(s.admin, 'audit', { to: '2000-01-01' }).audit.total, 0);
+
+  const one = s.call(s.admin, 'audit', { limit: 1 });
+  assert.strictEqual(one.audit.entries.length, 1);
+  assert.ok(one.audit.total >= 3);
+
+  assert.match(s.call(t, 'audit').error, /للمدير فقط/);
 });
 
 test('source tabs are found despite spaces and spelling, or the real names are listed', () => {

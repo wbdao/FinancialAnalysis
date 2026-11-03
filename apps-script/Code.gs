@@ -10,7 +10,8 @@
  *   list       → طلبات نطاق المستخدم
  *   recheck    → فحص طلب بالبيانات الحالية قبل القرار
  *   decide     → اعتماد أو رفض (معتمد أو مدير)
- *   users، userSave، setRules → للمدير فقط
+ *   audit      → سجل العمليات مع تصفية اختيارية (للمدير فقط)
+ *   users، userSave، setRules، refresh → للمدير فقط
  *   changePassword، logout → لكل مستخدم
  *
  * الشيتات تُنشأ تلقائيًا في شيت الطلبات: «طلبات الفواتير» و«المستخدمين» و«سجل العمليات».
@@ -32,7 +33,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-05-a8';
+const BUILD = '2026-11-06-a9';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -129,7 +130,10 @@ function doPost(e) {
 function route_(req, who) {
   switch (req.action) {
     case 'logout': return logout_(req.token);
-    case 'ping': return { rules: rules_() };
+    case 'ping': {
+      const meta = snapshotMeta_();
+      return { rules: rules_(), dataAt: meta ? meta.builtAt : 0 };
+    }
     case 'data': return data_(who);
     case 'list': return { requests: scopedRequests_(who) };
     case 'add': return add_(req, who);
@@ -137,6 +141,7 @@ function route_(req, who) {
     case 'decide': return { request: decide_(req, who) };
     case 'changePassword': return changePassword_(req, who);
     case 'users': requireAdmin_(who); return { users: usersList_() };
+    case 'audit': requireAdmin_(who); return { audit: auditList_(req) };
     case 'userSave': requireAdmin_(who); return { users: locked_(function () { return userSave_(req, who); }) };
     case 'setRules': requireAdmin_(who); return { rules: locked_(function () { return setRules_(req, who); }) };
     case 'refresh': requireAdmin_(who); return refresh_(who);
@@ -731,6 +736,7 @@ function add_(req, who) {
       const f = fieldOf_(h);
       return f ? row[f] : '';
     }));
+    audit_(publicName_(who), 'تسجيل طلب', row.id + ' · ' + row.customer + ' · ' + row.amount + ' · ' + row.verdict);
     return { request: row };
   });
 }
@@ -787,7 +793,7 @@ function decide_(req, who) {
     put('decidedAt', now_());
     put('decisionNote', safe_(req.note));
     put('verdictAtDecision', check.verdictLabel + (check.reasons ? ': ' + safe_(check.reasons) : ''));
-    audit_(publicName_(who), decision, text_(req.id));
+    audit_(publicName_(who), decision, text_(req.id) + ' · ' + text_(r.customer) + ' · ' + Number(r.amount));
     return rowToObject_(headers, row);
   });
 }
@@ -814,6 +820,42 @@ function ensureSheet_(book, name, columns) {
     sh.setFrozenRows(1);
   }
   return sh;
+}
+
+/**
+ * auditList_ - the operation log, newest first. The filters are optional and
+ * compare on the text the sheet already holds, so no date parsing is needed.
+ */
+function auditList_(req) {
+  const sh = requestsBook_().getSheetByName(LOG_SHEET);
+  if (!sh || sh.getLastRow() < 2) return { entries: [], total: 0, actions: [] };
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues();
+  const all = rows.map(function (v) {
+    return {
+      at: isDate_(v[0]) ? formatDate_(v[0]) : text_(v[0]),
+      user: text_(v[1]),
+      action: text_(v[2]),
+      detail: text_(v[3]),
+    };
+  }).filter(function (e) { return e.at || e.user || e.action; });
+  const from = text_(req.from);
+  const to = text_(req.to);
+  const user = text_(req.user).toLowerCase();
+  const op = text_(req.op);
+  const entries = all.filter(function (e) {
+    const day = e.at.slice(0, 10);
+    if (from && day < from) return false;
+    if (to && day > to) return false;
+    if (user && e.user.toLowerCase().indexOf(user) < 0) return false;
+    if (op && e.action !== op) return false;
+    return true;
+  });
+  // The filter menu always lists every operation, not just the filtered ones.
+  const actions = all.map(function (e) { return e.action; })
+    .filter(function (a, i, list) { return a && list.indexOf(a) === i; })
+    .sort(function (a, b) { return a.localeCompare(b, 'ar'); });
+  const limit = Math.min(Math.max(parseInt(req.limit, 10) || 500, 1), 2000);
+  return { entries: entries.slice(-limit).reverse(), total: entries.length, actions: actions };
 }
 
 function audit_(who, action, detail) {
