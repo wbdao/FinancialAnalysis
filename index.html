@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=12">
+  <link rel="stylesheet" href="styles.css?v=13">
 </head>
 <body data-view="login">
 
@@ -16,6 +16,7 @@
     <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
     <symbol id="i-invoices" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-checks" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4M15 15h2"/><path d="M7 3h10"/></symbol>
     <symbol id="i-requests" viewBox="0 0 24 24"><path d="M9 4h6v3H9z"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="m8 14 2 2 4-4"/></symbol>
     <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13A4 4 0 0 1 19 7a4 4 0 0 1-3 3.87"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></symbol>
@@ -52,6 +53,9 @@
         </button>
         <button type="button" data-view="check">
           <svg class="icon"><use href="#i-check"></use></svg><span>فحص فاتورة جديدة</span>
+        </button>
+        <button type="button" data-view="checks">
+          <svg class="icon"><use href="#i-checks"></use></svg><span>مركز الشيكات</span>
         </button>
 
         <p class="nav-label">الإدارة</p>
@@ -235,6 +239,70 @@
             </form>
             <div id="checkResult"></div>
           </div>
+        </section>
+
+        <section id="view-checks" hidden>
+          <div id="checkKpis" class="kpis kpis-4"></div>
+          <section class="card table-card">
+            <div class="card-head">
+              <div>
+                <h2>كل الشيكات</h2>
+                <p id="checksCount" class="muted" aria-live="polite"></p>
+              </div>
+              <button type="button" id="checksExport" class="btn ghost">
+                <svg class="icon"><use href="#i-download"></use></svg><span>تصدير CSV</span>
+              </button>
+            </div>
+
+            <div class="filters">
+              <label class="field grow">بحث
+                <span class="input-wrap">
+                  <svg class="icon"><use href="#i-search"></use></svg>
+                  <input id="checkQuery" type="search" placeholder="رقم الشيك أو العميل أو الكود" autocomplete="off">
+                </span>
+              </label>
+              <label class="field compact">الحالة
+                <select id="checkStatus">
+                  <option value="">كل الحالات</option>
+                  <option value="rejected">مرفوض</option>
+                  <option value="due">مستحق</option>
+                  <option value="open">تحت التحصيل</option>
+                  <option value="closed">مغلق</option>
+                </select>
+              </label>
+              <label class="field compact">المصدر
+                <select id="checkSource">
+                  <option value="">كل المصادر</option>
+                  <option value="main">الشيت الرئيسي</option>
+                  <option value="wh">شيكات المخازن</option>
+                </select>
+              </label>
+              <label class="field compact">الترتيب
+                <select id="checkSort">
+                  <option value="due">الأقرب استحقاقًا</option>
+                  <option value="amount">الأعلى قيمة</option>
+                  <option value="customer">اسم العميل</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>الشيك</th><th>العميل</th><th class="n">القيمة</th><th class="n">الصافي</th>
+                    <th>الاستحقاق</th><th>المهلة</th><th>المصدر</th><th>الحالة</th>
+                  </tr>
+                </thead>
+                <tbody id="checkRows"></tbody>
+              </table>
+            </div>
+            <button type="button" id="checksMore" class="btn ghost more" hidden>عرض المزيد</button>
+          </section>
+        </section>
+
+        <section id="view-customer" hidden>
+          <div id="customerBody" class="customer-view"></div>
         </section>
 
         <section id="view-requests" hidden>
@@ -459,8 +527,8 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=12"></script>
-  <script src="demo.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <script src="engine.js?v=13"></script>
+  <script src="demo.js?v=13"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

@@ -13,6 +13,7 @@
   const TOKEN_KEY = 'financialAnalysis.token';
   const PAGE_SIZE = 300;
   const REQUEST_PAGE = 100;
+  const CHECK_PAGE = 200;
   const STATUS_TAG = { 'قيد الاعتماد': 'warn', 'معتمد': 'ok', 'مرفوض': 'stop', 'لا يحتاج اعتماد': 'paid' };
   const VERDICT_TAG = { 'سليمة': 'ok', 'تحتاج موافقة': 'warn', 'موقوفة': 'stop' };
   const VERDICT = { ok: 'منتظمة', warn: 'تحتاج متابعة', stop: 'حرجة', paid: 'مسددة' };
@@ -34,6 +35,8 @@
     login: ['تسجيل الدخول', 'الوصول إلى لوحة التحكم'],
     invoices: ['لوحة التحكم', 'نظرة شاملة على الائتمان والضمان والمتأخرات'],
     check: ['فحص فاتورة جديدة', 'قرار سريع قبل إصدار الفاتورة'],
+    checks: ['مركز الشيكات', 'الشيكات المفتوحة والمستحقة والمرتجعة'],
+    customer: ['ملف العميل', 'الصورة الكاملة للعميل قبل القرار'],
     requests: ['الطلبات والاعتمادات', 'متابعة الطلبات وقرارات الاعتماد'],
     users: ['المستخدمون', 'إدارة الحسابات والصلاحيات ونطاق المخازن'],
     audit: ['سجل العمليات', 'كل دخول وقرار وتغيير، مع الوقت والمنفذ'],
@@ -50,6 +53,7 @@
     shown: PAGE_SIZE, bucket: null, filtered: [], requests: [], users: [], lastCheck: null, deciding: null,
     decisionPending: false, decisionPreview: false, cacheSavedAt: null,
     build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
+    checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -231,9 +235,11 @@
     Object.assign(state, {
       user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null,
       isDemo: false, cacheSavedAt: null, build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
+      checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
     });
-    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount']) $(id).innerHTML = '';
+    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount', 'checkKpis', 'checkRows', 'checksCount', 'customerBody']) $(id).innerHTML = '';
     $('requestsMore').hidden = true;
+    $('checksMore').hidden = true;
     showBuild();
     $('userAvatar').textContent = '؟';
     document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = true; });
@@ -313,6 +319,7 @@
     const { base, tx, analysisDay, checks } = state.sheets;
     state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
+    state.checkList = readChecks();
     const prepared = state.sheets.dataAt ? ` · البيانات من ${timeOf(state.sheets.dataAt)}` : '';
     $('stamp').textContent = `المتأخرات حتى ${dateOf(state.result.analysisDay)}${prepared}`;
     $('snapshotInfo').textContent = state.sheets.dataAt ? `آخر تجهيز: ${timeOf(state.sheets.dataAt)}` : '';
@@ -323,6 +330,8 @@
     fillRulesForm();
     state.shown = PAGE_SIZE;
     renderInvoices();
+    if (document.body.dataset.view === 'checks') renderChecks();
+    if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
     $('checkResult').innerHTML = '';
   }
 
@@ -398,7 +407,7 @@
   /* ---- navigation ------------------------------------------------------------- */
 
   function show(view) {
-    for (const name of ['login', 'invoices', 'check', 'requests', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
+    for (const name of ['login', 'invoices', 'check', 'checks', 'customer', 'requests', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
     document.querySelectorAll('.tabs button').forEach((b) => {
       if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
@@ -410,6 +419,8 @@
       $('pageSubtitle').textContent = meta[1];
       document.title = `${meta[0]} · موقف الفواتير`;
     }
+    if (view === 'checks' && state.result) renderChecks();
+    if (view === 'customer' && state.result) renderCustomer();
     document.body.classList.remove('nav-open');
     $('menuToggle').setAttribute('aria-expanded', 'false');
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -569,7 +580,7 @@
     $('rows').innerHTML = shown.map((i) => `
       <tr tabindex="0" data-key="${i.key}">
         <td>${esc(i.number)}<span class="sub">${esc(i.type)}</span></td>
-        <td>${esc(i.customer)}<span class="sub">${esc(i.account)} · ${esc(i.rep)}</span></td>
+        <td><button type="button" class="link-btn" data-account="${esc(i.account)}">${esc(i.customer)}</button><span class="sub">${esc(i.account)} · ${esc(i.rep)}</span></td>
         <td class="date">${dateOf(i.day)}</td>
         <td class="n">${money(i.amount)}</td>
         <td class="n">${money(i.remaining)}</td>
@@ -616,6 +627,9 @@
     $('detailBody').innerHTML = `
       <h2 id="detailTitle">${esc(inv.type)} ${esc(inv.number)} <span class="tag ${inv.verdict}">${VERDICT[inv.verdict]}</span></h2>
       <p class="muted">${esc(inv.customer)} · ${esc(inv.account)}</p>
+      <p class="actions"><button type="button" class="btn ghost" data-account="${esc(inv.account)}">
+        <svg class="icon"><use href="#i-users"></use></svg><span>ملف العميل 360</span>
+      </button></p>
       <h3>الفاتورة</h3>
       <div class="panel"><dl>
         ${row('تاريخ الفاتورة', dateOf(inv.day))}
@@ -695,6 +709,9 @@
     $('checkResult').innerHTML = `
       <div class="result">
         <div class="decision ${r.verdict}">${title}<small>${esc(c.name)} · فاتورة بقيمة ${money(amount)}. ${sub}</small></div>
+        <div class="actions"><button type="button" class="btn ghost" data-account="${esc(c.account)}">
+          <svg class="icon"><use href="#i-users"></use></svg><span>ملف العميل 360</span>
+        </button></div>
         <div class="cards">
           ${card('الائتمان', r.checks.credit, creditWhy)}
           ${card('الضمان', r.checks.guarantee, guaranteeWhy)}
@@ -712,6 +729,237 @@
         <div class="panel"><h3>موقف العميل الحالي</h3>${customerFacts(c)}</div>
       </div>`;
     $('sendRequest').addEventListener('click', sendRequest);
+  }
+
+  /* ---- checks center ---------------------------------------------------------- */
+
+  // One list from both check tabs. A customer missing from the base still shows,
+  // so an unmatched check stays visible instead of disappearing.
+  function readChecks() {
+    if (!state.sheets || !state.sheets.checks) return [];
+    let list;
+    try {
+      list = Engine.parseChecks(state.sheets.checks.main, state.sheets.checks.wh);
+    } catch (e) {
+      console.warn('checks not parsed', e);
+      return [];
+    }
+    const byAccount = new Map();
+    for (const c of state.result ? state.result.customers : []) byAccount.set(String(c.account).trim(), c);
+    return list.map((k) => {
+      const c = byAccount.get(String(k.account).trim());
+      return Object.assign({}, k, { customer: c ? c.name : 'غير موجود في قاعدة العملاء', known: !!c });
+    });
+  }
+
+  function checkStatus(k) {
+    if (!k.open) return { key: 'closed', label: 'مغلق', tag: 'paid' };
+    if (k.rejected) return { key: 'rejected', label: 'مرفوض', tag: 'stop' };
+    if (k.due != null && k.due <= state.result.analysisDay) return { key: 'due', label: 'مستحق', tag: 'warn' };
+    return { key: 'open', label: 'تحت التحصيل', tag: 'ok' };
+  }
+
+  function checkTiming(k) {
+    if (!k.open || k.due == null) return '—';
+    const days = k.due - state.result.analysisDay;
+    if (days > 0) return `بعد ${money(days)} يوم`;
+    if (days === 0) return 'مستحق اليوم';
+    return `متأخر ${money(-days)} يوم`;
+  }
+
+  function filteredChecks() {
+    const q = $('checkQuery').value.trim().toLowerCase();
+    const status = $('checkStatus').value;
+    const source = $('checkSource').value;
+    const list = (state.checkList || []).filter((k) => {
+      if (status && checkStatus(k).key !== status) return false;
+      if (source && k.src !== source) return false;
+      return !q || [k.checkNo, k.account, k.customer].some((v) => String(v == null ? '' : v).toLowerCase().includes(q));
+    });
+    const rank = (k) => ({ rejected: 0, due: 1, open: 2, closed: 3 }[checkStatus(k).key]);
+    const dueKey = (k) => (k.due == null ? Number.MAX_SAFE_INTEGER : k.due);
+    const sort = $('checkSort').value;
+    return list.sort((a, b) => {
+      if (sort === 'amount') return b.net - a.net || a.customer.localeCompare(b.customer, 'ar');
+      if (sort === 'customer') return a.customer.localeCompare(b.customer, 'ar') || String(a.checkNo).localeCompare(String(b.checkNo), 'ar');
+      return rank(a) - rank(b) || dueKey(a) - dueKey(b) || b.net - a.net;
+    });
+  }
+
+  function renderChecks() {
+    if (!state.result) return;
+    const all = state.checkList || [];
+    const open = all.filter((k) => k.open);
+    const due = open.filter((k) => !k.rejected && k.due != null && k.due <= state.result.analysisDay);
+    const rejected = open.filter((k) => k.rejected);
+    const next = open
+      .filter((k) => !k.rejected && k.due != null && k.due > state.result.analysisDay)
+      .sort((a, b) => a.due - b.due)[0];
+    const sum = (list) => list.reduce((n, k) => n + (Number(k.net) || 0), 0);
+    $('checkKpis').innerHTML = [
+      kpiCard('wallet', 'primary', 'شيكات مفتوحة', money(sum(open)), `${money(open.length)} شيك`),
+      kpiCard('clock', 'warn', 'مستحقة لم تُصرف', money(sum(due)), `${money(due.length)} شيك`),
+      kpiCard('ban', 'stop', 'شيكات مرفوضة', money(sum(rejected)), `${money(rejected.length)} شيك`),
+      next
+        ? kpiCard('check-circle', 'info', 'أقرب استحقاق', dateOf(next.due), `${next.checkNo} · بعد ${next.due - state.result.analysisDay} يوم`)
+        : kpiCard('check-circle', 'info', 'أقرب استحقاق', '—', all.length ? 'لا يوجد استحقاق قادم' : 'شيت الشيكات غير متاح'),
+    ].join('');
+    const list = filteredChecks();
+    $('checksCount').innerHTML = `<span class="chip">${money(list.length)} شيك · ${money(sum(list.filter((k) => k.open)))} مفتوح</span>`;
+    const shown = list.slice(0, state.checkShown);
+    $('checksMore').hidden = shown.length >= list.length;
+    if (!list.length) {
+      $('checkRows').innerHTML = `<tr><td colspan="8" class="empty">${all.length ? 'لا توجد شيكات مطابقة.' : 'شيت الشيكات غير متاح أو لا يحتوي بيانات.'}</td></tr>`;
+      return;
+    }
+    $('checkRows').innerHTML = shown.map((k) => {
+      const st = checkStatus(k);
+      return `<tr>
+        <td>${esc(k.checkNo || '—')}<span class="sub">${k.src === 'wh' ? 'شيك مخازن' : 'الشيت الرئيسي'}</span></td>
+        <td><button type="button" class="link-btn" data-account="${esc(k.account)}">${esc(k.customer)}</button><span class="sub">${esc(k.account)}</span></td>
+        <td class="n">${money(k.amount)}</td>
+        <td class="n">${money(k.net)}</td>
+        <td class="date">${dateOf(k.due)}</td>
+        <td>${esc(checkTiming(k))}</td>
+        <td>${k.src === 'wh' ? 'مخازن' : 'رئيسي'}</td>
+        <td><span class="tag ${st.tag}">${st.label}</span></td>
+      </tr>`;
+    }).join('');
+  }
+
+  function exportChecks() {
+    const header = ['الشيك', 'العميل', 'الكود', 'المصدر', 'القيمة', 'الصافي', 'الاستحقاق', 'المهلة', 'الحالة'];
+    const rows = filteredChecks().map((k) => [
+      k.checkNo, k.customer, k.account, k.src === 'wh' ? 'مخازن' : 'رئيسي',
+      Math.round(k.amount), Math.round(k.net), k.due == null ? '' : dateOf(k.due),
+      checkTiming(k), checkStatus(k).label,
+    ]);
+    downloadCsv(`الشيكات-${dateOf(state.result.analysisDay)}.csv`, header, rows);
+  }
+
+  /* ---- customer profile ------------------------------------------------------- */
+
+  function customerByAccount(account) {
+    if (!state.result) return null;
+    const key = String(account).trim();
+    return state.result.customers.find((c) => String(c.account).trim() === key) || null;
+  }
+
+  function openCustomer(account, from) {
+    const c = customerByAccount(account);
+    if (!c) {
+      banner(`لم أجد العميل ${account} في نطاقك الحالي.`, true);
+      return;
+    }
+    state.customerAccount = c.account;
+    state.customerFrom = from || (document.body.dataset.view !== 'customer' ? document.body.dataset.view : 'invoices');
+    show('customer');
+  }
+
+  function customerChecks(c) {
+    const key = String(c.account).trim();
+    return (state.checkList || []).filter((k) => String(k.account).trim() === key);
+  }
+
+  function customerRequestsHtml(c) {
+    if (!state.requestsLoaded) {
+      return state.isDemo
+        ? '<p class="empty">الطلبات لا تُقرأ في وضع البيانات النموذجية.</p>'
+        : `<p class="muted">لم تُقرأ الطلبات في هذه الجلسة بعد.</p>
+           <button type="button" class="btn ghost" data-load-requests>جلب طلبات العميل</button>`;
+    }
+    const key = String(c.account).trim();
+    const list = state.requests
+      .filter((r) => String(r.account).trim() === key)
+      .slice()
+      .reverse();
+    if (!list.length) return '<p class="empty">لا توجد طلبات مسجلة لهذا العميل.</p>';
+    return `<div class="table-wrap compact-table"><table>
+      <thead><tr><th>الطلب</th><th class="n">القيمة</th><th>الفحص</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+      <tbody>${list.slice(0, 20).map((r) => `
+        <tr>
+          <td>${esc(r.id)}<span class="sub">${esc(r.requester || '')}</span></td>
+          <td class="n">${money(r.amount)}</td>
+          <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span><span class="sub">${esc(r.reasons || '')}</span></td>
+          <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
+          <td class="date">${esc(r.createdAt)}</td>
+        </tr>`).join('')}</tbody>
+    </table></div>${list.length > 20 ? `<p class="muted profile-note">يُعرض أحدث 20 طلبًا من ${money(list.length)}.</p>` : ''}`;
+  }
+
+  function renderCustomer() {
+    const c = customerByAccount(state.customerAccount);
+    if (!c) { show('invoices'); return; }
+    const checks = customerChecks(c);
+    const openChecks = checks.filter((k) => k.open);
+    const rejected = openChecks.filter((k) => k.rejected);
+    const dueChecks = openChecks.filter((k) => !k.rejected && k.due != null && k.due <= state.result.analysisDay);
+    const sum = (list) => list.reduce((n, k) => n + (Number(k.net) || 0), 0);
+    const invoices = c.invoices.slice().sort((a, b) => (b.isOpen - a.isOpen) || b.day - a.day);
+    const from = { checks: 'مركز الشيكات', requests: 'الطلبات', check: 'فحص فاتورة جديدة', invoices: 'الفواتير' }[state.customerFrom] || 'الفواتير';
+    const stateTag = c.stopped ? '<span class="tag stop">حساب موقوف</span>'
+      : c.overLimit > 0 ? '<span class="tag warn">تجاوز الحد</span>'
+      : c.overdue > 0 ? '<span class="tag warn">عليه متأخرات</span>'
+      : '<span class="tag ok">منتظم</span>';
+    $('customerBody').innerHTML = `
+      <section class="profile-head panel">
+        <span class="avatar lg" aria-hidden="true">${esc((c.name || c.account).trim().charAt(0))}</span>
+        <div class="profile-id">
+          <h2>${esc(c.name)} ${stateTag}</h2>
+          <p class="muted">${esc(c.account)} · ${esc(c.warehouse || 'بلا مخزن')} · ${esc(c.group || 'بلا مجموعة')} · ${esc(c.rep || 'بلا مندوب')}</p>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn ghost" data-back>رجوع إلى ${esc(from)}</button>
+          <button type="button" class="btn" data-check-customer="${esc(c.account)}">
+            <svg class="icon"><use href="#i-check"></use></svg><span>فحص فاتورة</span>
+          </button>
+        </div>
+      </section>
+      <div class="kpis kpis-4">
+        ${kpiCard('wallet', 'primary', 'الرصيد', money(c.balance), 'بدون الشيكات المفتوحة')}
+        ${kpiCard('check-circle', 'info', 'الرصيد شامل الشيكات', money(c.exposure), `${money(c.checksOpenCount)} شيك مفتوح`)}
+        ${kpiCard('shield', c.creditLimit > 0 ? 'ok' : 'warn', 'المتاح من حد الائتمان', c.creditLimit > 0 ? money(c.availableCredit) : 'لا يوجد حد', c.creditLimit > 0 ? `الحد ${money(c.creditLimit)}` : 'حد الائتمان غير مسجل')}
+        ${kpiCard('clock', c.overdue > 0 ? 'warn' : 'ok', 'المتأخرات', money(c.overdue), c.oldestOverdueDays ? `أقدمها ${money(c.oldestOverdueDays)} يوم` : 'لا توجد متأخرات')}
+      </div>
+      <div class="profile-grid">
+        <section class="panel"><h3>الموقف الائتماني</h3>${customerFacts(c)}</section>
+        <section class="panel">
+          <h3>ملخص الشيكات</h3>
+          <dl>
+            <dt>شيكات مفتوحة</dt><dd>${money(sum(openChecks))} · ${money(openChecks.length)} شيك</dd>
+            <dt>مستحقة لم تُصرف</dt><dd>${money(sum(dueChecks))} · ${money(dueChecks.length)} شيك</dd>
+            <dt>مرفوضة</dt><dd>${money(sum(rejected))} · ${money(rejected.length)} شيك</dd>
+            <dt>أقرب استحقاق</dt><dd>${c.checksNextDue != null ? dateOf(c.checksNextDue) : '—'}</dd>
+          </dl>
+          ${checks.length ? `<h3 class="sub-head">شيكات العميل (${money(checks.length)})</h3>
+          <div class="table-wrap compact-table"><table>
+            <thead><tr><th>الشيك</th><th class="n">الصافي</th><th>الاستحقاق</th><th>الحالة</th></tr></thead>
+            <tbody>${checks.slice().sort((a, b) => (a.open === b.open ? 0 : a.open ? -1 : 1)
+              || (a.due == null ? Number.MAX_SAFE_INTEGER : a.due) - (b.due == null ? Number.MAX_SAFE_INTEGER : b.due)).map((k) => {
+              const st = checkStatus(k);
+              return `<tr><td>${esc(k.checkNo || '—')}<span class="sub">${k.src === 'wh' ? 'مخازن' : 'رئيسي'}</span></td>
+                <td class="n">${money(k.net)}</td><td class="date">${dateOf(k.due)}</td>
+                <td><span class="tag ${st.tag}">${st.label}</span></td></tr>`;
+            }).join('')}</tbody>
+          </table></div>` : '<p class="empty">لا توجد شيكات على هذا العميل.</p>'}
+        </section>
+      </div>
+      <section class="card table-card">
+        <div class="card-head"><div><h2>فواتير العميل</h2><p class="muted">${money(invoices.length)} فاتورة · ${money(invoices.filter((x) => x.isOpen).length)} مفتوحة</p></div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>الفاتورة</th><th>التاريخ</th><th class="n">القيمة</th><th class="n">المتبقي</th><th>الاستحقاق</th><th>الموقف</th></tr></thead>
+          <tbody>${invoices.length ? invoices.slice(0, 30).map((x) => `
+            <tr><td><button type="button" class="link-btn" data-invoice="${x.key}">${esc(x.number)}</button><span class="sub">${esc(x.type)}</span></td>
+              <td class="date">${dateOf(x.day)}</td><td class="n">${money(x.amount)}</td><td class="n">${money(x.remaining)}</td>
+              <td class="date">${dateOf(x.dueDay)}</td><td><span class="tag ${x.verdict}">${VERDICT[x.verdict]}</span></td></tr>`).join('')
+            : '<tr><td colspan="6" class="empty">لا توجد فواتير لهذا العميل.</td></tr>'}</tbody>
+        </table></div>
+        ${invoices.length > 30 ? `<p class="muted profile-note">يُعرض أحدث 30 فاتورة من ${money(invoices.length)}.</p>` : ''}
+      </section>
+      <section class="panel customer-requests">
+        <h3>طلبات العميل</h3>
+        ${customerRequestsHtml(c)}
+      </section>`;
   }
 
   /* ---- requests and approvals --------------------------------------------------- */
@@ -747,13 +995,17 @@
     try {
       const data = await callScript('list');
       state.requests = data.requests;
+      state.requestsLoaded = true;
       state.requestShown = REQUEST_PAGE;
       renderRequests();
+      if (state.customerAccount && document.body.dataset.view === 'customer') renderCustomer();
     } catch (e) {
       state.requests = [];
+      state.requestsLoaded = false;
       $('requestRows').innerHTML = '';
       $('requestsMore').hidden = true;
       $('requestsCount').textContent = e.message;
+      if (state.customerAccount && document.body.dataset.view === 'customer') renderCustomer();
     } finally {
       $('requestsReload').disabled = false;
     }
@@ -799,7 +1051,7 @@
     $('requestRows').innerHTML = shown.map((r) => `
       <tr>
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
-        <td>${esc(r.customer)}<span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
+        <td><button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button><span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
         <td class="n">${money(r.amount)}</td>
         <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span><span class="sub">${esc(r.reasons)}</span></td>
         <td>${esc(r.requester)}${r.note ? `<span class="sub">${esc(r.note)}</span>` : ''}</td>
@@ -1194,8 +1446,39 @@
   $('requestsReload').addEventListener('click', loadRequests);
   $('requestsExport').addEventListener('click', exportRequests);
   $('requestRows').addEventListener('click', (e) => {
+    const link = e.target.closest('button[data-account]');
+    if (link) { openCustomer(link.dataset.account, 'requests'); return; }
     const b = e.target.closest('button[data-id]');
     if (b) openDecision(b.dataset.id);
+  });
+  for (const id of ['checkStatus', 'checkSource', 'checkSort']) {
+    $(id).addEventListener('change', () => { state.checkShown = CHECK_PAGE; renderChecks(); });
+  }
+  let checkTimer = null;
+  $('checkQuery').addEventListener('input', () => {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(() => { state.checkShown = CHECK_PAGE; renderChecks(); }, 160);
+  });
+  $('checksMore').addEventListener('click', () => { state.checkShown += CHECK_PAGE; renderChecks(); });
+  $('checksExport').addEventListener('click', exportChecks);
+  $('checkRows').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-account]');
+    if (b) openCustomer(b.dataset.account, 'checks');
+  });
+  $('customerBody').addEventListener('click', (e) => {
+    if (e.target.closest('[data-back]')) { show(state.customerFrom || 'invoices'); return; }
+    const check = e.target.closest('[data-check-customer]');
+    if (check) {
+      const c = customerByAccount(check.dataset.checkCustomer);
+      show('check');
+      $('checkCustomer').value = c ? `${c.account} — ${c.name}` : check.dataset.checkCustomer;
+      $('checkAmount').focus();
+      return;
+    }
+    const inv = e.target.closest('[data-invoice]');
+    if (inv) { openDetail(state.result.invoices[+inv.dataset.invoice]); return; }
+    const load = e.target.closest('[data-load-requests]');
+    if (load) { load.disabled = true; load.textContent = 'جارٍ جلب الطلبات…'; loadRequests(); }
   });
   for (const id of ['auditFrom', 'auditTo', 'auditAction']) {
     $(id).addEventListener('change', loadAudit);
@@ -1234,9 +1517,24 @@
     state.bucket = state.bucket === bucket ? null : bucket;
     refilter();
   });
-  $('rows').addEventListener('click', (e) => openRow(e.target.closest('tr')));
+  $('rows').addEventListener('click', (e) => {
+    const link = e.target.closest('button[data-account]');
+    if (link) { openCustomer(link.dataset.account, 'invoices'); return; }
+    openRow(e.target.closest('tr'));
+  });
   $('rows').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') openRow(e.target.closest('tr'));
+  });
+  $('detailBody').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-account]');
+    if (!b) return;
+    const from = document.body.dataset.view === 'customer' ? state.customerFrom : 'invoices';
+    $('detail').close();
+    openCustomer(b.dataset.account, from);
+  });
+  $('checkResult').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-account]');
+    if (b) openCustomer(b.dataset.account, 'check');
   });
 
   initTheme();

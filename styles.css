@@ -468,11 +468,14 @@ tr:focus-visible {
 
 #view-invoices > * + *,
 #view-check > * + *,
+#view-checks > * + *,
 #view-users > * + *,
 #view-settings > * + * { margin-top: 16px; }
 
 #view-invoices,
 #view-check,
+#view-checks,
+#view-customer,
 #view-requests,
 #view-users,
 #view-settings { animation: rise .3s ease both; }
@@ -485,8 +488,11 @@ tr:focus-visible {
   gap: 14px;
 }
 
+.kpis-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
 @media (min-width: 1650px) {
   .kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .kpis.kpis-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 .kpi {
@@ -764,6 +770,25 @@ td.date, .n { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .empty { padding: 34px; text-align: center; color: var(--muted); }
 .more { display: flex; margin: 14px auto 18px; }
 
+/* A customer name or invoice number that opens its file without changing the row action. */
+.link-btn {
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--primary);
+  text-align: start;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.link-btn:hover { text-decoration: underline; }
+.link-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+#view-checks table { min-width: 980px; }
+#view-customer table { min-width: 860px; }
+#view-customer .compact-table table { min-width: 0; }
+
 .users-table table { min-width: 820px; }
 #view-requests table { min-width: 940px; }
 #view-audit table { min-width: 720px; }
@@ -933,6 +958,50 @@ select {
   align-items: start;
 }
 .grid-2 .form { max-width: none; margin: 0; }
+
+/* ---- customer profile ---------------------------------------------------- */
+
+.customer-view { display: grid; gap: 16px; }
+
+.profile-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+}
+.profile-head .avatar.lg {
+  width: 54px;
+  height: 54px;
+  font-size: 21px;
+  box-shadow: 0 0 0 4px var(--primary-soft);
+}
+.profile-id { flex: 1 1 260px; min-width: 0; }
+.profile-id h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+.profile-id p { margin-top: 3px; }
+.profile-head .actions { margin-inline-start: auto; }
+
+.profile-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.profile-grid .panel > h3 { margin-bottom: 12px; font-size: 14px; font-weight: 800; }
+.profile-grid .sub-head { margin: 18px 0 8px; font-size: 12.5px; font-weight: 800; color: var(--muted); }
+.profile-grid .compact-table { max-height: 310px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.profile-note { padding: 10px 18px 14px; }
+.customer-requests > h3 { margin-bottom: 12px; font-size: 14px; font-weight: 800; }
+.customer-requests .table-wrap { margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.customer-requests .profile-note { padding: 8px 0 0; }
 
 .form-error {
   padding: 9px 12px;
@@ -1185,6 +1254,8 @@ dialog .cards { margin-top: 4px; }
   .status-chart { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 22px; }
   .legend { width: auto; min-width: 230px; }
   .grid-2 { grid-template-columns: 1fr; }
+  .profile-grid { grid-template-columns: 1fr; }
+  .profile-grid .compact-table { max-height: none; }
 }
 
 @media (max-width: 900px) {
@@ -1215,6 +1286,8 @@ dialog .cards { margin-top: 4px; }
   .banner { margin: 14px 16px 0; }
   .stamp { display: none; }
   .login-card { max-width: 620px; }
+  .kpis-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-head .actions { margin-inline-start: 0; width: 100%; }
 }
 
 @media (max-width: 640px) {
