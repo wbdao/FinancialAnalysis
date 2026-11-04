@@ -25,14 +25,16 @@
   const ROLE_ADMIN = 'مدير';
   const ROLE_APPROVER = 'معتمد';
   const ROLE_DELIVERY = 'محاسب مخزن';
+  const ROLE_COLLECTOR = 'محصل';
   // A user may hold any mix of these; viewing is open to every signed-in user.
   const PERM = {
     add: 'تسجيل الطلبات',
     approve: 'اعتماد الطلبات',
     deliver: 'متابعة التسليم',
+    collect: 'متابعة التحصيل',
     admin: 'إدارة النظام',
   };
-  const PERM_LIST = [PERM.add, PERM.approve, PERM.deliver, PERM.admin];
+  const PERM_LIST = [PERM.add, PERM.approve, PERM.deliver, PERM.collect, PERM.admin];
   // Delivery is tracked beside approval: an approved order can wait in the
   // warehouse for a truck without changing its approval status.
   const DELIVERY = {
@@ -54,6 +56,7 @@
     [DELIVERY.delivered]: 'ok',
     [DELIVERY.failed]: 'stop',
   };
+  const PROMISE_TAG = { 'قائم': 'warn', 'تم الوفاء': 'ok', 'أخلف': 'stop', 'ملغي': 'paid' };
   const THEME_KEY = 'financialAnalysis.theme';
   // The snapshot is a read cache: decisions still go to the script.
   const CACHE_DB = 'financialAnalysis.cache';
@@ -69,6 +72,7 @@
     checks: ['مركز الشيكات', 'الشيكات المفتوحة والمستحقة والمرتجعة'],
     customer: ['ملف العميل', 'الصورة الكاملة للعميل قبل القرار'],
     requests: ['الطلبات والاعتمادات', 'متابعة الطلبات وقرارات الاعتماد'],
+    promises: ['وعود السداد', 'متابعة الوعود والمتأخرات ومواعيد التحصيل'],
     users: ['المستخدمون', 'إدارة الحسابات والصلاحيات ونطاق المخازن'],
     audit: ['سجل العمليات', 'كل دخول وقرار وتغيير، مع الوقت والمنفذ'],
     settings: ['الإعدادات', 'كلمة المرور وقواعد التحليل'],
@@ -89,6 +93,7 @@
     build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
     checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
     requestsLoading: false, requestsError: '',
+    promises: [], promisesLoaded: false, promisesLoading: false, promisesError: '', promiseEditing: null,
     plans: [], plansLoaded: false, editing: null,
   };
 
@@ -269,6 +274,7 @@
     if (user.role === ROLE_ADMIN) return PERM_LIST.slice();
     if (user.role === ROLE_APPROVER) return [PERM.add, PERM.approve, PERM.deliver];
     if (user.role === ROLE_DELIVERY) return [PERM.deliver];
+    if (user.role === ROLE_COLLECTOR) return [PERM.collect];
     return [PERM.add];
   }
 
@@ -280,6 +286,7 @@
   const canAdd = () => hasPerm(PERM.add);
   const canDecide = () => hasPerm(PERM.approve);
   const canDeliver = () => hasPerm(PERM.deliver);
+  const canCollect = () => hasPerm(PERM.collect);
   const isAdmin = () => hasPerm(PERM.admin);
 
   function applyPermissions() {
@@ -428,9 +435,10 @@
       isDemo: false, cacheSavedAt: null, build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
       checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
       requestsLoading: false, requestsError: '',
+      promises: [], promisesLoaded: false, promisesLoading: false, promisesError: '', promiseEditing: null,
       plans: [], plansLoaded: false, editing: null,
     });
-    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'dashboardBody', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount', 'checkKpis', 'checkRows', 'checksCount', 'customerBody']) $(id).innerHTML = '';
+    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'dashboardBody', 'requestRows', 'userRows', 'checkResult', 'customerList', 'promiseCustomerList', 'promiseRows', 'promisesCount', 'auditRows', 'auditCount', 'checkKpis', 'checkRows', 'checksCount', 'customerBody']) $(id).innerHTML = '';
     $('requestsMore').hidden = true;
     $('checksMore').hidden = true;
     showBuild();
@@ -522,10 +530,12 @@
     banner([cacheNote(), (demoNote + issuesText(state.result.issues)).trim()].filter(Boolean).join(' '));
     fillRepFilter();
     fillCustomerList();
+    fillPromiseCustomerList();
     fillRulesForm();
     state.shown = PAGE_SIZE;
     renderInvoices();
     if (document.body.dataset.view === 'dashboard') renderDashboard();
+    if (document.body.dataset.view === 'promises') renderPromises();
     if (document.body.dataset.view === 'checks') renderChecks();
     if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
     $('checkResult').innerHTML = '';
@@ -545,7 +555,7 @@
       console.info('data read', data.stats);
       recompute();
       show('dashboard');
-      if (!state.isDemo) loadRequests();
+      if (!state.isDemo) { loadRequests(); loadPromises(); }
       await saveCache();
     } catch (e) {
       console.error(e);
@@ -590,6 +600,10 @@
     const { base, tx, checks } = window.demoSheets();
     state.isDemo = true;
     state.cacheSavedAt = null;
+    state.promises = [];
+    state.promisesLoaded = false;
+    state.promisesError = '';
+    state.promiseEditing = null;
     state.plans = DEMO_PLANS;
     state.plansLoaded = true;
     fillPlanList();
@@ -608,7 +622,7 @@
   /* ---- navigation ------------------------------------------------------------- */
 
   function show(view) {
-    for (const name of ['login', 'dashboard', 'invoices', 'check', 'checks', 'customer', 'requests', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
+    for (const name of ['login', 'dashboard', 'invoices', 'check', 'checks', 'customer', 'requests', 'promises', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
     document.querySelectorAll('.tabs button').forEach((b) => {
       if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
@@ -620,9 +634,10 @@
       $('pageSubtitle').textContent = meta[1];
       document.title = `${meta[0]} · موقف الفواتير`;
     }
-    if (view === 'dashboard') { renderDashboard(); ensureRequests(); }
+    if (view === 'dashboard') { renderDashboard(); ensureRequests(); ensurePromises(); }
+    if (view === 'promises') { renderPromises(); ensurePromises(); }
     if (view === 'checks' && state.result) renderChecks();
-    if (view === 'customer' && state.result) renderCustomer();
+    if (view === 'customer' && state.result) { renderCustomer(); ensurePromises(); }
     document.body.classList.remove('nav-open');
     $('menuToggle').setAttribute('aria-expanded', 'false');
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -834,6 +849,12 @@
     const live = requests.filter(deliveryApplies);
     const late = live.filter((r) => deliveryLate(r) > 0);
     const oldestLate = late.reduce((m, r) => Math.max(m, deliveryLate(r)), 0);
+    const promises = state.promises || [];
+    const promiseKnown = state.promisesLoaded;
+    const today = dateOf(state.result.analysisDay);
+    const openPromises = promises.filter((p) => p.status === 'قائم');
+    const overduePromises = openPromises.filter((p) => p.due && p.due < today);
+    const promiseAmount = openPromises.reduce((n, p) => n + (Number(p.amount) || 0), 0);
     const checks = state.checkList || [];
     const rejected = checks.filter((k) => k.open && k.rejected);
     const due = checks.filter((k) => k.open && !k.rejected && k.due != null && k.due <= state.result.analysisDay);
@@ -927,6 +948,30 @@
                   <span class="tag stop">متأخر</span>
                 </li>`).join('')}</ul>`
             : '<p class="dash-empty">لا يوجد تسليم متأخر.</p>'}
+        </section>
+
+        <section class="card dash-card dash-span-12" aria-labelledby="dashPromisesTitle">
+          <div class="card-head">
+            <div><h2 id="dashPromisesTitle">وعود السداد</h2><p>${promiseKnown ? `${money(openPromises.length)} قائم · ${money(overduePromises.length)} متأخر · ${money(promiseAmount)}` : 'متابعة الوعود والتحصيل'}</p></div>
+            <div class="actions">
+              ${canCollect() ? '<button type="button" class="btn ghost" data-dash-action="newPromise">وعد جديد</button>' : ''}
+              <button type="button" class="link-btn" data-dash-action="promises">كل الوعود</button>
+            </div>
+          </div>
+          ${!promiseKnown
+            ? `<div class="dash-empty">${state.isDemo ? 'وضع البيانات النموذجية لا يقرأ وعود السداد.' : state.promisesError ? esc(state.promisesError) : 'جارٍ تحميل وعود السداد…'}</div>`
+            : !openPromises.length
+              ? '<div class="dash-empty">لا توجد وعود سداد قائمة.</div>'
+              : `<div class="table-wrap dash-table"><table>
+                  <thead><tr><th>العميل</th><th class="n">المبلغ</th><th>تاريخ الوعد</th><th>المتبقي</th><th>المسؤول</th></tr></thead>
+                  <tbody>${openPromises.slice(0, 5).map((p) => `<tr tabindex="0" data-promise-edit="${esc(p.id)}">
+                    <td><button type="button" class="link-btn" data-account="${esc(p.account)}">${esc(p.customer)}</button><span class="sub">${esc(p.id)}</span></td>
+                    <td class="n">${money(p.amount)}</td>
+                    <td class="date">${esc(p.due || '—')}</td>
+                    <td>${esc(promiseTiming(p))}</td>
+                    <td>${esc(p.owner || '—')}</td>
+                  </tr>`).join('')}</tbody>
+                </table></div>`}
         </section>
 
         <section class="card chart-card dash-span-7" aria-labelledby="dashAgingTitle">
@@ -1326,7 +1371,7 @@
     const dueChecks = openChecks.filter((k) => !k.rejected && k.due != null && k.due <= state.result.analysisDay);
     const sum = (list) => list.reduce((n, k) => n + (Number(k.net) || 0), 0);
     const invoices = c.invoices.slice().sort((a, b) => (b.isOpen - a.isOpen) || b.day - a.day);
-    const from = { dashboard: 'لوحة القيادة', checks: 'مركز الشيكات', requests: 'الطلبات', check: 'فحص فاتورة جديدة', invoices: 'الفواتير' }[state.customerFrom] || 'الفواتير';
+    const from = { dashboard: 'لوحة القيادة', checks: 'مركز الشيكات', requests: 'الطلبات', promises: 'وعود السداد', check: 'فحص فاتورة جديدة', invoices: 'الفواتير' }[state.customerFrom] || 'الفواتير';
     const stateTag = c.stopped ? '<span class="tag stop">حساب موقوف</span>'
       : c.overLimit > 0 ? '<span class="tag warn">تجاوز الحد</span>'
       : c.overdue > 0 ? '<span class="tag warn">عليه متأخرات</span>'
@@ -1389,7 +1434,152 @@
       <section class="panel customer-requests">
         <h3>طلبات العميل</h3>
         ${customerRequestsHtml(c)}
+      </section>
+      <section class="panel customer-promises">
+        <div class="card-head">
+          <h3>وعود السداد</h3>
+          ${canCollect() ? `<button type="button" class="btn ghost" data-promise-new="${esc(c.account)}">وعد جديد</button>` : ''}
+        </div>
+        ${promiseCustomerHtml(c)}
       </section>`;
+  }
+
+  /* ---- payment promises ----------------------------------------------------- */
+
+  function promiseTiming(p) {
+    if (!p || p.status !== 'قائم' || !p.due || !state.result) return '—';
+    const days = dayDiff(dateOf(state.result.analysisDay), p.due);
+    if (days > 0) return `متأخر ${money(days)} يوم`;
+    if (days === 0) return 'مستحق اليوم';
+    return `بعد ${money(-days)} يوم`;
+  }
+
+  function promiseStatusTag(status) { return PROMISE_TAG[status] || 'paid'; }
+
+  function fillPromiseCustomerList() {
+    if (!state.result) return;
+    $('promiseCustomerList').innerHTML = state.result.customers.map((c) =>
+      `<option value="${esc(c.account)}">${esc(c.name)} · ${esc(c.warehouse || 'بلا مخزن')}</option>`).join('');
+  }
+
+  function promiseCustomerHtml(c) {
+    if (!state.promisesLoaded) {
+      return state.isDemo
+        ? '<p class="empty">الوعود لا تُقرأ في وضع البيانات النموذجية.</p>'
+        : `<p class="muted">لم تُقرأ وعود هذا العميل بعد.</p>
+           <button type="button" class="btn ghost" data-load-promises>جلب الوعود</button>`;
+    }
+    const key = String(c.account).trim();
+    const list = state.promises
+      .filter((p) => String(p.account).trim() === key)
+      .sort((a, b) => String(a.due).localeCompare(String(b.due)) || String(a.id).localeCompare(String(b.id)));
+    if (!list.length) return '<p class="empty">لا توجد وعود سداد لهذا العميل.</p>';
+    return `<div class="table-wrap compact-table"><table>
+      <thead><tr><th>الوعد</th><th class="n">المبلغ</th><th>تاريخ الوعد</th><th>المتبقي</th><th>الحالة</th><th>المسؤول</th></tr></thead>
+      <tbody>${list.map((p) => `<tr>
+        <td><button type="button" class="link-btn" data-promise-edit="${esc(p.id)}">${esc(p.id)}</button>${p.note ? `<span class="sub">${esc(p.note)}</span>` : ''}</td>
+        <td class="n">${money(p.amount)}</td>
+        <td class="date">${esc(p.due || '—')}</td>
+        <td>${esc(promiseTiming(p))}</td>
+        <td><span class="tag ${promiseStatusTag(p.status)}">${esc(p.status)}</span></td>
+        <td>${esc(p.owner || '—')}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  }
+
+  function filteredPromises() {
+    const q = $('promiseQuery').value.trim().toLowerCase();
+    const status = $('promiseFilterStatus').value;
+    const overdueOnly = $('promiseOverdue').checked;
+    const today = state.result ? dateOf(state.result.analysisDay) : todayStr();
+    return state.promises.filter((p) => {
+      if (status && p.status !== status) return false;
+      if (overdueOnly && !(p.status === 'قائم' && p.due && p.due < today)) return false;
+      return !q || [p.id, p.customer, p.account, p.owner, p.note]
+        .some((v) => String(v == null ? '' : v).toLowerCase().includes(q));
+    }).sort((a, b) => String(a.due).localeCompare(String(b.due)) || String(a.id).localeCompare(String(b.id)));
+  }
+
+  function renderPromises() {
+    if (!state.promisesLoaded) {
+      const msg = state.isDemo ? 'الوعود لا تُقرأ في وضع البيانات النموذجية.' : state.promisesError || 'جارٍ تحميل الوعود…';
+      $('promisesCount').textContent = state.isDemo ? 'وضع البيانات النموذجية' : state.promisesError || 'جارٍ تحميل الوعود…';
+      $('promiseRows').innerHTML = `<tr><td colspan="8" class="empty">${esc(msg)}</td></tr>`;
+      return;
+    }
+    const list = filteredPromises();
+    const open = state.promises.filter((p) => p.status === 'قائم');
+    const today = state.result ? dateOf(state.result.analysisDay) : todayStr();
+    const overdue = open.filter((p) => p.due && p.due < today);
+    const amount = open.reduce((n, p) => n + (Number(p.amount) || 0), 0);
+    $('promisesCount').innerHTML = `<span class="chip">${money(list.length)} وعد</span>`
+      + `<span class="chip">قائم ${money(open.length)} · ${money(amount)}</span>`
+      + (overdue.length ? `<span class="chip stop">متأخر ${money(overdue.length)}</span>` : '');
+    if (!list.length) {
+      $('promiseRows').innerHTML = '<tr><td colspan="8" class="empty">لا توجد وعود مطابقة.</td></tr>';
+      return;
+    }
+    $('promiseRows').innerHTML = list.map((p) => `
+      <tr tabindex="0" data-promise-edit="${esc(p.id)}">
+        <td>${esc(p.id)}<span class="sub">${esc(p.createdAt || '')}</span></td>
+        <td><button type="button" class="link-btn" data-account="${esc(p.account)}">${esc(p.customer)}</button><span class="sub">${esc(p.account)} · ${esc(p.warehouse || 'بلا مخزن')}</span></td>
+        <td class="n">${money(p.amount)}</td>
+        <td class="date">${esc(p.due || '—')}</td>
+        <td>${esc(promiseTiming(p))}</td>
+        <td><span class="tag ${promiseStatusTag(p.status)}">${esc(p.status)}</span></td>
+        <td>${esc(p.owner || '—')}</td>
+        <td>${p.note ? esc(p.note) : '<span class="sub">—</span>'}</td>
+      </tr>`).join('');
+  }
+
+  function openPromise(account, id) {
+    if (!canCollect()) return;
+    const p = id ? state.promises.find((x) => x.id === id) : null;
+    if (id && !p) return;
+    state.promiseEditing = p;
+    $('promiseTitle').textContent = p ? `تعديل وعد السداد ${p.id}` : 'وعد سداد جديد';
+    $('promiseInfo').innerHTML = p
+      ? `<span class="tag ${promiseStatusTag(p.status)}">${esc(p.status)}</span><span>${esc(p.customer)} · ${money(p.amount)}</span>`
+      : `<span>المسؤول: ${esc(state.user ? state.user.name : '')}</span>`;
+    $('promiseAccount').value = p ? p.account : (account || '');
+    $('promiseAccount').readOnly = !!p;
+    $('promiseAmount').value = p ? p.amount : '';
+    $('promiseDue').value = p ? p.due : todayStr();
+    $('promiseStatus').value = p ? p.status : 'قائم';
+    $('promiseNote').value = p ? p.note : '';
+    $('promiseError').hidden = true;
+    $('promiseSave').disabled = false;
+    $('promiseDialog').showModal();
+    $('promiseDialog').scrollTop = 0;
+  }
+
+  async function savePromiseForm() {
+    if (!canCollect()) return;
+    const p = state.promiseEditing;
+    $('promiseSave').disabled = true;
+    $('promiseError').hidden = true;
+    try {
+      const data = await callScript('savePromise', {
+        id: p ? p.id : '',
+        account: $('promiseAccount').value.trim(),
+        amount: $('promiseAmount').value.trim(),
+        due: $('promiseDue').value,
+        status: $('promiseStatus').value,
+        note: $('promiseNote').value,
+      });
+      const saved = data.promise;
+      state.promises = p ? state.promises.map((x) => (x.id === saved.id ? saved : x)) : [...state.promises, saved];
+      state.promisesLoaded = true;
+      $('promiseDialog').close();
+      renderPromises();
+      if (document.body.dataset.view === 'dashboard') renderDashboard();
+      if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
+      banner(`تم حفظ وعد السداد ${saved.id}.`);
+    } catch (e) {
+      $('promiseError').textContent = e.message;
+      $('promiseError').hidden = false;
+      $('promiseSave').disabled = false;
+    }
   }
 
   /* ---- requests and approvals --------------------------------------------------- */
@@ -1442,6 +1632,31 @@
       msg.textContent = e.message;
       $('sendRequest').disabled = false;
     }
+  }
+
+  async function loadPromises() {
+    if (state.promisesLoading || state.isDemo) return;
+    state.promisesLoading = true;
+    state.promisesError = '';
+    try {
+      const data = await callScript('promises');
+      state.promises = data.promises || [];
+      state.promisesLoaded = true;
+    } catch (e) {
+      state.promises = [];
+      state.promisesLoaded = false;
+      state.promisesError = e.message;
+    } finally {
+      state.promisesLoading = false;
+      if (document.body.dataset.view === 'promises') renderPromises();
+      if (document.body.dataset.view === 'dashboard') renderDashboard();
+      if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
+    }
+  }
+
+  function ensurePromises() {
+    if (state.isDemo || !state.token || state.promisesLoaded || state.promisesLoading) return;
+    loadPromises();
   }
 
   async function loadRequests() {
@@ -2069,6 +2284,7 @@
     'موظف': [PERM.add],
     'معتمد': [PERM.add, PERM.approve, PERM.deliver],
     'محاسب مخزن': [PERM.deliver],
+    'محصل': [PERM.collect],
     'مشاهد': [],
     'مدير': PERM_LIST.slice(),
   };
@@ -2078,6 +2294,7 @@
       [PERM.add, 'permAdd'],
       [PERM.approve, 'permApprove'],
       [PERM.deliver, 'permDeliver'],
+      [PERM.collect, 'permCollect'],
       [PERM.admin, 'permAdmin'],
     ].filter(([, id]) => $(id).checked).map(([p]) => p);
   }
@@ -2086,6 +2303,7 @@
     $('permAdd').checked = list.includes(PERM.add);
     $('permApprove').checked = list.includes(PERM.approve);
     $('permDeliver').checked = list.includes(PERM.deliver);
+    $('permCollect').checked = list.includes(PERM.collect);
     $('permAdmin').checked = list.includes(PERM.admin);
     syncAdminLock();
   }
@@ -2093,7 +2311,7 @@
   // «إدارة النظام» already carries everything, so the other boxes stay fixed.
   function syncAdminLock() {
     const on = $('permAdmin').checked;
-    for (const id of ['permAdd', 'permApprove', 'permDeliver']) $(id).disabled = on;
+    for (const id of ['permAdd', 'permApprove', 'permDeliver', 'permCollect']) $(id).disabled = on;
   }
 
   function presetOf(list) {
@@ -2323,6 +2541,25 @@
   });
   $('requestsReload').addEventListener('click', loadRequests);
   $('requestsExport').addEventListener('click', exportRequests);
+  $('promisesReload').addEventListener('click', loadPromises);
+  $('promisesNew').addEventListener('click', () => openPromise());
+  for (const id of ['promiseQuery', 'promiseFilterStatus', 'promiseOverdue']) {
+    $(id).addEventListener(id === 'promiseQuery' ? 'input' : 'change', renderPromises);
+  }
+  $('promiseRows').addEventListener('click', (e) => {
+    const account = e.target.closest('button[data-account]');
+    if (account) { openCustomer(account.dataset.account, 'promises'); return; }
+    const row = e.target.closest('[data-promise-edit]');
+    if (row) openPromise(null, row.dataset.promiseEdit);
+  });
+  $('promiseRows').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const row = e.target.closest('tr[data-promise-edit]');
+    if (row && e.target === row) openPromise(null, row.dataset.promiseEdit);
+  });
+  $('promiseSave').addEventListener('click', savePromiseForm);
+  $('promiseCancel').addEventListener('click', () => $('promiseDialog').close());
+  $('promiseDialog').addEventListener('close', () => { state.promiseEditing = null; });
   $('requestRows').addEventListener('click', (e) => {
     const link = e.target.closest('button[data-account]');
     if (link) { openCustomer(link.dataset.account, 'requests'); return; }
@@ -2365,7 +2602,13 @@
     const inv = e.target.closest('[data-invoice]');
     if (inv) { openDetail(state.result.invoices[+inv.dataset.invoice]); return; }
     const load = e.target.closest('[data-load-requests]');
-    if (load) { load.disabled = true; load.textContent = 'جارٍ جلب الطلبات…'; loadRequests(); }
+    if (load) { load.disabled = true; load.textContent = 'جارٍ جلب الطلبات…'; loadRequests(); return; }
+    const promiseNew = e.target.closest('[data-promise-new]');
+    if (promiseNew) { openPromise(promiseNew.dataset.promiseNew); return; }
+    const promiseEdit = e.target.closest('[data-promise-edit]');
+    if (promiseEdit) { openPromise(null, promiseEdit.dataset.promiseEdit); return; }
+    const promiseLoad = e.target.closest('[data-load-promises]');
+    if (promiseLoad) { promiseLoad.disabled = true; promiseLoad.textContent = 'جارٍ جلب الوعود…'; loadPromises(); }
   });
   for (const id of ['auditFrom', 'auditTo', 'auditAction']) {
     $(id).addEventListener('change', loadAudit);
@@ -2481,10 +2724,14 @@
     if (account) { openCustomer(account.dataset.account, 'dashboard'); return; }
     const review = e.target.closest('[data-review]');
     if (review) { openRequest(review.dataset.review); return; }
+    const promiseRow = e.target.closest('[data-promise-edit]');
+    if (promiseRow) { openPromise(null, promiseRow.dataset.promiseEdit); return; }
     const action = e.target.closest('[data-dash-action]');
     if (!action) return;
     const view = action.dataset.dashAction;
     if (view === 'requests') { show('requests'); ensureRequests(); return; }
+    if (view === 'promises') { show('promises'); ensurePromises(); return; }
+    if (view === 'newPromise') { openPromise(); return; }
     if (view === 'loadRequests') { loadRequests(); return; }
     if (view === 'invoices') { show('invoices'); renderInvoices(); return; }
     show(view);
@@ -2492,7 +2739,9 @@
   $('dashboardBody').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     const row = e.target.closest('tr[data-review]');
-    if (row && e.target === row) openRequest(row.dataset.review);
+    if (row && e.target === row) { openRequest(row.dataset.review); return; }
+    const promiseRow = e.target.closest('tr[data-promise-edit]');
+    if (promiseRow && e.target === promiseRow) openPromise(null, promiseRow.dataset.promiseEdit);
   });
 
   initTheme();

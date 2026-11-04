@@ -10,6 +10,8 @@
  *   edit       → تعديل طلب قيد الاعتماد أو مرفوض وإعادة إرساله
  *   plans      → خطط السداد من شيت «طرق السداد» إن وُجد
  *   list       → طلبات نطاق المستخدم
+ *   promises   → وعود السداد في نطاق المستخدم
+ *   savePromise → تسجيل وعد سداد أو تحديث حالته
  *   recheck    → فحص طلب بالبيانات الحالية قبل القرار
  *   decide     → اعتماد أو رفض (معتمد أو مدير)
  *   audit      → سجل العمليات مع تصفية اختيارية (للمدير فقط)
@@ -40,7 +42,7 @@ const PLANS_TAB = 'طرق السداد';
 const PLANS_FALLBACK_TAB = 'PaymantSchedual';
 const PLANS_SHEET_ID = '';
 
-const BUILD = '2026-11-06-a16';
+const BUILD = '2026-11-06-a17';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -63,17 +65,19 @@ const DELIVERY_REASONS = [
 ];
 
 const ROLE_USER = 'موظف', ROLE_APPROVER = 'معتمد', ROLE_ADMIN = 'مدير', ROLE_DELIVERY = 'محاسب مخزن';
+const ROLE_COLLECTOR = 'محصل';
 const ROLE_VIEWER = 'مشاهد', ROLE_CUSTOM = 'مخصص';
-const ROLES = [ROLE_USER, ROLE_APPROVER, ROLE_DELIVERY, ROLE_ADMIN];
+const ROLES = [ROLE_USER, ROLE_APPROVER, ROLE_DELIVERY, ROLE_COLLECTOR, ROLE_ADMIN];
 // A user may hold any mix of these instead of one fixed role. Viewing is open
 // to every signed-in user; the rest are granted one by one.
 const PERM = {
   add: 'تسجيل الطلبات',
   approve: 'اعتماد الطلبات',
   deliver: 'متابعة التسليم',
+  collect: 'متابعة التحصيل',
   admin: 'إدارة النظام',
 };
-const PERM_LIST = [PERM.add, PERM.approve, PERM.deliver, PERM.admin];
+const PERM_LIST = [PERM.add, PERM.approve, PERM.deliver, PERM.collect, PERM.admin];
 const ALL_WAREHOUSES = 'الكل';
 const BREAK_GLASS = '*admin*';
 const LOGIN_NEEDED = 'سجّل الدخول من جديد.';
@@ -155,6 +159,18 @@ const USER_COLUMNS = {
   permissions: 'الصلاحيات',
 };
 
+const PROMISE_TAB = 'وعود السداد';
+const PROMISE_ID_PREFIX = 'PRM';
+const PROMISE_STATUS = { open: 'قائم', kept: 'تم الوفاء', broken: 'أخلف', cancelled: 'ملغي' };
+const PROMISE_STATUS_LIST = [
+  PROMISE_STATUS.open, PROMISE_STATUS.kept, PROMISE_STATUS.broken, PROMISE_STATUS.cancelled,
+];
+const PROMISE_COLUMNS = {
+  id: 'رقم الوعد', account: 'كود العميل', customer: 'اسم العميل', warehouse: 'Warehouse Group',
+  amount: 'المبلغ الموعود', due: 'تاريخ الوعد', status: 'حالة الوعد', owner: 'المسؤول',
+  note: 'ملاحظة', createdAt: 'تاريخ الإنشاء', createdBy: 'أنشأه', updatedAt: 'آخر تحديث', updatedBy: 'حدّثه',
+};
+
 function doGet() {
   return json_({ ok: true, build: BUILD });
 }
@@ -184,6 +200,8 @@ function route_(req, who) {
     case 'data': return data_(who);
     case 'plans': return { plans: paymentPlans_() };
     case 'list': return { requests: scopedRequests_(who) };
+    case 'promises': return { promises: scopedPromises_(who).map(promiseView_) };
+    case 'savePromise': return locked_(function () { return { promise: savePromise_(req, who) }; });
     case 'add': return add_(req, who);
     case 'edit': return { request: edit_(req, who) };
     case 'recheck': return { check: recheck_(req, who) };
@@ -378,6 +396,7 @@ function rolePermissions_(role) {
   if (role === ROLE_ADMIN) return PERM_LIST.slice();
   if (role === ROLE_APPROVER) return [PERM.add, PERM.approve, PERM.deliver];
   if (role === ROLE_DELIVERY) return [PERM.deliver];
+  if (role === ROLE_COLLECTOR) return [PERM.collect];
   if (role === ROLE_VIEWER || role === ROLE_CUSTOM) return [];
   return [PERM.add];
 }
@@ -390,6 +409,7 @@ function roleForPermissions_(list) {
   if (!key) return ROLE_VIEWER;
   if (key === [PERM.add].join('|')) return ROLE_USER;
   if (key === [PERM.deliver].join('|')) return ROLE_DELIVERY;
+  if (key === [PERM.collect].join('|')) return ROLE_COLLECTOR;
   if (key === [PERM.add, PERM.approve, PERM.deliver].join('|')) return ROLE_APPROVER;
   return ROLE_CUSTOM;
 }
@@ -1101,6 +1121,148 @@ function edit_(req, who) {
 
 function scopedRequests_(who) {
   return readAll_(requestsSheet_()).filter(function (r) { return inScope_(who, r.warehouse); });
+}
+
+/* ---- payment promises ---- */
+
+function promisesSheet_() {
+  return ensureSheet_(requestsBook_(), PROMISE_TAB, PROMISE_COLUMNS);
+}
+
+function promiseField_(header) {
+  return Object.keys(PROMISE_COLUMNS).filter(function (f) { return PROMISE_COLUMNS[f] === header; })[0];
+}
+
+function promiseView_(p) {
+  const out = Object.assign({}, p);
+  delete out.row;
+  return out;
+}
+
+function cellDate_(v) {
+  return isDate_(v) ? formatDate_(v).slice(0, 10) : text_(v).slice(0, 10);
+}
+
+function readPromises_() {
+  const sh = promisesSheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  const headers = headers_(sh);
+  const at = {};
+  Object.keys(PROMISE_COLUMNS).forEach(function (f) { at[f] = headers.indexOf(PROMISE_COLUMNS[f]); });
+  return sh.getRange(2, 1, last - 1, headers.length).getValues().map(function (v, i) {
+    const p = { row: i + 2 };
+    Object.keys(PROMISE_COLUMNS).forEach(function (f) {
+      p[f] = f === 'due' ? cellDate_(v[at[f]]) : text_(v[at[f]]);
+    });
+    p.amount = Number(p.amount) || 0;
+    if (!p.status) p.status = PROMISE_STATUS.open;
+    return p;
+  }).filter(function (p) { return p.id; });
+}
+
+function scopedPromises_(who) {
+  return readPromises_()
+    .filter(function (p) { return inScope_(who, p.warehouse); })
+    .sort(function (a, b) { return a.due.localeCompare(b.due) || a.id.localeCompare(b.id); });
+}
+
+function nextPromiseId_(all) {
+  const max = all.reduce(function (m, p) {
+    const n = parseInt(String(p.id).replace(PROMISE_ID_PREFIX, ''), 10);
+    return n > m ? n : m;
+  }, 0);
+  return PROMISE_ID_PREFIX + String(max + 1).padStart(ID_DIGITS, '0');
+}
+
+function promiseAmount_(v) {
+  const s = text_(v).replace(/,/g, '');
+  const n = Number(s);
+  if (!s || !isFinite(n) || n <= 0) throw new Error('المبلغ الموعود يجب أن يكون أكبر من صفر.');
+  return Math.round(n * 100) / 100;
+}
+
+function promiseCustomer_(who, account) {
+  const code = text_(account);
+  if (!code) throw new Error('كود العميل مطلوب.');
+  const sheets = scopedSheets_(who, code);
+  if (sheets.base.length < 2) throw new Error('العميل غير موجود أو خارج نطاق مخازنك: ' + code);
+  const c = Engine.analyze(sheets.base, sheets.tx, rules_(), sheets.analysisDay, sheets.checks).customers[0];
+  if (!c) throw new Error('العميل غير موجود أو خارج نطاق مخازنك: ' + code);
+  return c;
+}
+
+/**
+ * savePromise_ - records a collection promise or updates its amount, date and
+ * status. The customer and warehouse are fixed after creation, so a promise
+ * cannot move to another customer's file by a stale browser payload.
+ */
+function savePromise_(req, who) {
+  if (!hasPerm_(who, PERM.collect)) throw new Error('تسجيل وعود السداد يتطلب صلاحية متابعة التحصيل.');
+  const id = text_(req.id);
+  const amount = promiseAmount_(req.amount);
+  const due = dateOnly_(req.due);
+  if (!due) throw new Error('تاريخ الوعد مطلوب.');
+  const status = text_(req.status) || PROMISE_STATUS.open;
+  if (PROMISE_STATUS_LIST.indexOf(status) < 0) throw new Error('حالة الوعد غير معروفة: ' + status);
+  const note = safe_(req.note);
+  const sh = promisesSheet_();
+  const all = readPromises_();
+  const existing = id ? all.filter(function (p) { return text_(p.id) === id; })[0] : null;
+  if (id && !existing) throw new Error('وعد السداد غير موجود: ' + id);
+  if (existing && !inScope_(who, existing.warehouse)) throw new Error('وعد السداد خارج نطاق مخازنك: ' + id);
+
+  let account, customer, warehouse;
+  if (existing) {
+    account = existing.account;
+    customer = existing.customer;
+    warehouse = existing.warehouse;
+  } else {
+    const c = promiseCustomer_(who, req.account);
+    account = c.account;
+    customer = c.name;
+    warehouse = c.warehouse;
+  }
+  const now = now_();
+  const row = {
+    id: existing ? existing.id : nextPromiseId_(all),
+    account: account, customer: customer, warehouse: warehouse,
+    amount: amount, due: due, status: status,
+    owner: existing ? existing.owner : publicName_(who),
+    note: note,
+    createdAt: existing ? existing.createdAt : now,
+    createdBy: existing ? existing.createdBy : publicName_(who),
+    updatedAt: now, updatedBy: publicName_(who),
+  };
+  const headers = headers_(sh);
+  const detail = row.id + ' · ' + row.customer + ' · ' + row.amount + ' · ' + row.due + ' · ' + row.status;
+
+  if (existing) {
+    const before = id + ' · ' + existing.amount + ' → ' + row.amount + ' · ' + existing.due + ' → ' + row.due
+      + ' · ' + existing.status + ' → ' + row.status;
+    auditRequired_(publicName_(who), 'تحديث وعد سداد', before + (note ? ' · ' + note : ''));
+    try {
+      ['amount', 'due', 'status', 'note', 'updatedAt', 'updatedBy'].forEach(function (f) {
+        sh.getRange(existing.row, headers.indexOf(PROMISE_COLUMNS[f]) + 1).setValue(row[f]);
+      });
+    } catch (e) {
+      audit_(publicName_(who), 'تعذّر تنفيذ تحديث وعد سداد', before + ' · ' + e.message);
+      throw e;
+    }
+    return promiseView_(row);
+  }
+
+  auditRequired_(publicName_(who), 'تسجيل وعد سداد', detail + (note ? ' · ' + note : ''));
+  try {
+    sh.appendRow(headers.map(function (h) {
+      const f = promiseField_(h);
+      return f ? row[f] : '';
+    }));
+  } catch (e) {
+    audit_(publicName_(who), 'تعذّر تنفيذ تسجيل وعد سداد', detail + ' · ' + e.message);
+    throw e;
+  }
+  return promiseView_(row);
 }
 
 function findRequest_(who, id) {

@@ -1682,9 +1682,12 @@ dialog .cards { margin-top: 4px; }
 .dash-table table { min-width: 620px; }
 .dash-table th { position: sticky; top: 0; z-index: 2; }
 .dash-table td { font-size: 12.5px; }
-.dash-table tr[data-review] { cursor: pointer; }
-.dash-table tr[data-review]:hover { background: var(--surface-2); }
-.dash-table tr[data-review]:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.dash-table tr[data-review],
+.dash-table tr[data-promise-edit] { cursor: pointer; }
+.dash-table tr[data-review]:hover,
+.dash-table tr[data-promise-edit]:hover { background: var(--surface-2); }
+.dash-table tr[data-review]:focus-visible,
+.dash-table tr[data-promise-edit]:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .dash-span-12 .dash-table table { min-width: 720px; }
 
 @media (max-width: 1180px) {
@@ -1700,4 +1703,41 @@ dialog .cards { margin-top: 4px; }
   .dash-actions button { flex: 1 1 auto; }
   .dash-card { padding: 16px; }
   .dash-table { max-height: none; }
+}
+
+/* ---- payment promises ---------------------------------------------------- */
+
+#view-promises { animation: rise .3s ease both; }
+#view-promises > * + * { margin-top: 16px; }
+#view-promises table { min-width: 1060px; }
+#view-promises tr[data-promise-edit] { cursor: pointer; }
+#view-promises tr[data-promise-edit]:hover { background: var(--surface-2); }
+#view-promises tr[data-promise-edit]:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+#promisesCount { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 3px; }
+#promisesCount .chip.stop { color: var(--stop); border-color: var(--stop); }
+
+.promise-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+#promiseDialog { width: min(680px, calc(100vw - 32px)); }
+#promiseDialog .field { max-width: none; }
+#promiseDialog .actions { margin-top: 14px; }
+
+.customer-promises .card-head {
+  align-items: center;
+  padding: 0;
+}
+.customer-promises > .card-head h3 { font-size: 14px; font-weight: 800; }
+.customer-promises .compact-table {
+  max-height: 300px;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.customer-promises .empty { padding: 16px; }
+
+@media (max-width: 640px) {
+  .promise-grid { grid-template-columns: 1fr; }
 }

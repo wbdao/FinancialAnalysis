@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=20">
+  <link rel="stylesheet" href="styles.css?v=21">
 </head>
 <body data-view="login">
 
@@ -60,6 +60,9 @@
         </button>
         <button type="button" data-view="checks">
           <svg class="icon"><use href="#i-checks"></use></svg><span>مركز الشيكات</span>
+        </button>
+        <button type="button" data-view="promises">
+          <svg class="icon"><use href="#i-wallet"></use></svg><span>وعود السداد</span>
         </button>
 
         <p class="nav-label">الإدارة</p>
@@ -314,6 +317,53 @@
           <div id="customerBody" class="customer-view"></div>
         </section>
 
+        <section id="view-promises" hidden>
+          <section class="card table-card">
+            <div class="card-head">
+              <div>
+                <h2>وعود السداد</h2>
+                <p id="promisesCount" class="muted" aria-live="polite"></p>
+              </div>
+              <div class="actions">
+                <button type="button" id="promisesNew" class="btn" data-perm="متابعة التحصيل" hidden>
+                  <svg class="icon"><use href="#i-wallet"></use></svg><span>وعد جديد</span>
+                </button>
+                <button type="button" id="promisesReload" class="btn ghost">
+                  <svg class="icon"><use href="#i-refresh"></use></svg><span>تحديث</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="filters">
+              <label class="field grow">بحث
+                <span class="input-wrap">
+                  <svg class="icon"><use href="#i-search"></use></svg>
+                  <input id="promiseQuery" type="search" placeholder="الوعد أو العميل أو الكود أو المسؤول" autocomplete="off">
+                </span>
+              </label>
+              <label class="field compact">الحالة
+                <select id="promiseFilterStatus">
+                  <option value="">الكل</option>
+                  <option value="قائم">قائم</option>
+                  <option value="تم الوفاء">تم الوفاء</option>
+                  <option value="أخلف">أخلف</option>
+                  <option value="ملغي">ملغي</option>
+                </select>
+              </label>
+              <label class="check compact">
+                <input id="promiseOverdue" type="checkbox"> المتأخر فقط
+              </label>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>الوعد</th><th>العميل</th><th class="n">المبلغ</th><th>تاريخ الوعد</th><th>المتبقي</th><th>الحالة</th><th>المسؤول</th><th>ملاحظة</th></tr></thead>
+                <tbody id="promiseRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="view-requests" hidden>
           <section class="card table-card">
             <div class="card-head">
@@ -452,6 +502,7 @@
                   <label class="check"><input id="permAdd" type="checkbox"> تسجيل الطلبات</label>
                   <label class="check"><input id="permApprove" type="checkbox"> اعتماد الطلبات</label>
                   <label class="check"><input id="permDeliver" type="checkbox"> متابعة التسليم</label>
+                  <label class="check"><input id="permCollect" type="checkbox"> متابعة التحصيل</label>
                   <label class="check"><input id="permAdmin" type="checkbox"> إدارة النظام</label>
                 </div>
                 <p class="muted perm-hint">كل مستخدم يرى البيانات داخل مخازنه. «إدارة النظام» تمنح كل الصلاحيات.</p>
@@ -462,6 +513,7 @@
                   <option value="موظف">موظف: تسجيل الطلبات</option>
                   <option value="معتمد">معتمد: تسجيل واعتماد وتسليم</option>
                   <option value="محاسب مخزن">محاسب مخزن: متابعة التسليم</option>
+                  <option value="محصل">محصل: متابعة التحصيل</option>
                   <option value="مشاهد">مشاهد: عرض فقط</option>
                   <option value="مدير">مدير: كل الصلاحيات</option>
                 </select>
@@ -655,8 +707,41 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=20"></script>
-  <script src="demo.js?v=20"></script>
-  <script src="app.js?v=20"></script>
+  <dialog id="promiseDialog" aria-labelledby="promiseTitle">
+    <h2 id="promiseTitle">وعد سداد جديد</h2>
+    <p id="promiseInfo" class="review-meta"></p>
+    <div class="promise-grid">
+      <label class="field">العميل
+        <input id="promiseAccount" list="promiseCustomerList" placeholder="كود العميل" autocomplete="off" required>
+      </label>
+      <label class="field">المبلغ الموعود
+        <input id="promiseAmount" type="number" min="0.01" step="0.01" inputmode="decimal" dir="ltr" required>
+      </label>
+      <label class="field">تاريخ الوعد
+        <input id="promiseDue" type="date" required>
+      </label>
+      <label class="field">الحالة
+        <select id="promiseStatus">
+          <option value="قائم">قائم</option>
+          <option value="تم الوفاء">تم الوفاء</option>
+          <option value="أخلف">أخلف</option>
+          <option value="ملغي">ملغي</option>
+        </select>
+      </label>
+    </div>
+    <label class="field">ملاحظة
+      <textarea id="promiseNote" rows="2" maxlength="300"></textarea>
+    </label>
+    <p id="promiseError" class="form-error" role="alert" hidden></p>
+    <div class="actions">
+      <button type="button" id="promiseSave" class="btn">حفظ</button>
+      <button type="button" id="promiseCancel" class="btn ghost">إلغاء</button>
+    </div>
+  </dialog>
+  <datalist id="promiseCustomerList"></datalist>
+
+  <script src="engine.js?v=21"></script>
+  <script src="demo.js?v=21"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>

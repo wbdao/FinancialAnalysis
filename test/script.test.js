@@ -58,7 +58,7 @@ test('the placeholder admin password refuses every request', () => {
 
 test('every action but login needs a session', () => {
   const s = setup();
-  for (const action of ['data', 'ping', 'list', 'add', 'users', 'audit', 'decide', 'deliver']) {
+  for (const action of ['data', 'ping', 'list', 'promises', 'add', 'users', 'audit', 'decide', 'deliver']) {
     const r = s.post({ action, token: 'made-up' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.login, true);
@@ -720,6 +720,60 @@ test('a missing source link gives a clear message', () => {
   const noAccess = loadScript({ sourceId: 'OTHER', source: source() });
   const t2 = noAccess.post({ action: 'login', username: 'admin', password: PASS }).token;
   assert.match(noAccess.post({ action: 'data', token: t2 }).error, /تعذّر فتح شيت العملاء/);
+});
+
+test('promises: scoped by warehouse, editable, and marked kept', () => {
+  const s = setup();
+  const col65 = s.addUser('col65', 'محصل', ['65']);
+  const col70 = s.addUser('col70', 'محصل', ['70']);
+  const created = s.call(s.admin, 'savePromise', {
+    account: 'A1', amount: 1200, due: '2026-07-10', note: 'وعد العميل',
+  });
+  assert.ok(created.ok, created.error);
+  const id = created.promise.id;
+  assert.strictEqual(created.promise.customer, 'عميل أ');
+  assert.strictEqual(created.promise.warehouse, '65');
+  assert.strictEqual(created.promise.status, 'قائم');
+
+  assert.deepStrictEqual(s.call(col65, 'promises').promises.map((p) => p.id), [id]);
+  assert.deepStrictEqual(s.call(col70, 'promises').promises, []);
+  assert.match(s.call(col65, 'savePromise', { account: 'B1', amount: 10, due: '2026-07-10' }).error, /خارج نطاق/);
+
+  const second = s.call(s.admin, 'savePromise', { account: 'B1', amount: 500, due: '2026-07-11' });
+  assert.ok(second.ok, second.error);
+  assert.strictEqual(s.call(col65, 'promises').promises.length, 1);
+
+  const updated = s.call(col65, 'savePromise', {
+    id, amount: 1300, due: '2026-07-12', status: 'تم الوفاء', note: 'سدد',
+  });
+  assert.ok(updated.ok, updated.error);
+  assert.strictEqual(updated.promise.status, 'تم الوفاء');
+  const listed = s.call(col65, 'promises').promises.find((p) => p.id === id);
+  assert.strictEqual(listed.amount, 1300);
+  assert.strictEqual(listed.due, '2026-07-12');
+});
+
+test('promises: viewing is open, saving needs collection permission', () => {
+  const s = setup();
+  const viewer = s.addUser('viewer', 'موظف');
+  const collector = s.addUser('collector', 'محصل', ['65']);
+  assert.ok(s.call(viewer, 'promises').ok);
+  assert.match(s.call(viewer, 'savePromise', { account: 'A1', amount: 10, due: '2026-07-10' }).error, /متابعة التحصيل/);
+  assert.ok(s.call(collector, 'savePromise', { account: 'A1', amount: 10, due: '2026-07-10' }).ok);
+});
+
+test('promises: a promise is not written when the audit log cannot be written', () => {
+  const s = setup();
+  const first = s.call(s.admin, 'savePromise', { account: 'A1', amount: 100, due: '2026-07-10' });
+  assert.ok(first.ok, first.error);
+  const log = s.book.getSheetByName(LOG);
+  const append = log.appendRow;
+  log.appendRow = () => { throw new Error('audit down'); };
+  const blocked = s.call(s.admin, 'savePromise', { account: 'B1', amount: 200, due: '2026-07-11' });
+  assert.strictEqual(blocked.ok, false);
+  assert.match(blocked.error, /سجل العمليات/);
+  log.appendRow = append;
+  assert.strictEqual(s.call(s.admin, 'promises').promises.length, 1);
 });
 
 let failed = 0;
