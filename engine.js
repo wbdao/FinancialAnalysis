@@ -68,13 +68,15 @@
     return idx;
   }
 
-  /** Payment-schedule code to contract days (Fixed_N = N months, Sch_NW = N weeks). */
+  /** Payment-schedule code to contract days. */
   function termDays(code) {
     const c = str(code);
     let m;
     if ((m = /net\s*(\d+)/i.exec(c))) return +m[1];
     if ((m = /sch_(\d+)w/i.exec(c))) return 7 * m[1];
-    if ((m = /fixed_(\d+)/i.exec(c))) return 30 * m[1];
+    if ((m = /fixed[_\s-]*(\d+)/i.exec(c))) return 7 * m[1];
+    if ((m = /week[s]?[_\s-]*(\d+)/i.exec(c))) return 7 * m[1];
+    if ((m = /(اسبوع|أسابيع)[_س-]*(\d+)/i.exec(c))) return 7 * (+m[2]);
     if (/aow/i.test(c)) return 30;
     if (/cash/i.test(c)) return 1;
     return 0; // Stop and unknown codes: due immediately
