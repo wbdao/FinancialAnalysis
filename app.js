@@ -520,7 +520,7 @@
 
   function recompute() {
     const { base, tx, analysisDay, checks } = state.sheets;
-    state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks);
+    state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks, state.plans || []);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
     state.checkList = readChecks();
     const prepared = state.sheets.dataAt ? ` · البيانات من ${timeOf(state.sheets.dataAt)}` : '';
