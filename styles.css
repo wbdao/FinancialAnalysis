@@ -1327,6 +1327,27 @@ dialog .cards { margin-top: 4px; }
 
 .late { color: var(--stop); font-weight: 700; }
 .chip.stop { color: var(--stop); background: var(--stop-bg); border-color: var(--stop-line); }
+.chip.ok { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-line); }
+
+/* The agreed value stays, and the invoice value sits under it with the gap. */
+.actual { display: block; font-weight: 700; color: var(--ink); }
+.actual-line { display: block; margin-top: 2px; }
+.diff-up { color: var(--stop); font-weight: 700; }
+.diff-down { color: var(--ok); font-weight: 700; }
+
+.delivery-actual {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.delivery-actual > h4 {
+  margin: 0 0 9px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted);
+}
+.delivery-actual .delivery-grid { margin-bottom: 6px; }
+.delivery-actual .sub { margin: 0; }
 
 /* ---- scrollbars ---------------------------------------------------------- */
 

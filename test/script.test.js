@@ -285,6 +285,45 @@ test('delivery starts in the warehouse for a clean request and after approval', 
   assert.strictEqual(s.call(s.admin, 'list').requests.find((r) => r.id === id).deliveryStatus, 'في أرضية المخزن');
 });
 
+test('deliver: records the actual invoice value beside the agreed one', () => {
+  const s = setup();
+  const clerk = s.addUser('sara', 'موظف');
+  const delivery = s.addUser('mona', 'محاسب مخزن');
+  const id = s.call(clerk, 'add', { account: 'A1', amount: 3000 }).request.id;
+  s.call(s.admin, 'decide', { id, decision: 'approve' });
+  const deliver = (extra) => s.call(delivery, 'deliver',
+    Object.assign({ id, status: 'تم التسليم', at: '2026-11-07' }, extra));
+  const get = () => s.call(s.admin, 'list').requests.find((r) => r.id === id);
+
+  assert.match(deliver({ actual: 'abc' }).error, /رقم/);
+  assert.match(deliver({ actual: '-1' }).error, /سالبة/);
+  assert.match(deliver({ actual: '2500' }).error, /سبب اختلاف/);
+
+  const same = deliver({ actual: '3000' });
+  assert.strictEqual(same.request.actualAmount, 3000);
+  assert.strictEqual(same.request.actualNote, '');
+  assert.strictEqual(same.request.actualBy, 'اسم mona');
+  assert.ok(same.request.actualAt);
+
+  // A difference under one pound needs no reason; a real one does.
+  const cents = deliver({ actual: '3000.50' });
+  assert.strictEqual(cents.request.actualAmount, 3000.5);
+
+  const lower = deliver({ actual: '2,500', actualNote: 'خصم كمية' });
+  assert.strictEqual(lower.request.actualAmount, 2500);
+  assert.strictEqual(lower.request.actualNote, 'خصم كمية');
+  assert.strictEqual(get().actualAmount, 2500);
+
+  // An empty figure clears the value and its stamps.
+  const cleared = deliver({ actual: '' });
+  assert.strictEqual(cleared.request.actualAmount, '');
+  assert.strictEqual(cleared.request.actualNote, '');
+  assert.strictEqual(cleared.request.actualBy, '');
+  assert.strictEqual(cleared.request.actualAt, '');
+
+  assert.ok(JSON.stringify(s.book.getSheetByName(LOG).grid).includes('الفعلي'));
+});
+
 test('list: a warehouse user sees only requests of their warehouses', () => {
   const s = setup();
   s.call(s.admin, 'add', { account: 'A1', amount: 1 });

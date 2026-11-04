@@ -33,7 +33,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-06-a10';
+const BUILD = '2026-11-06-a11';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -121,6 +121,10 @@ const COLUMNS = {
   deliveryNote: 'ملاحظات التسليم',
   deliveryBy: 'محدّث التسليم',
   deliveryUpdatedAt: 'وقت تحديث التسليم',
+  actualAmount: 'القيمة الفعلية',
+  actualNote: 'سبب اختلاف القيمة',
+  actualBy: 'محدّث القيمة الفعلية',
+  actualAt: 'وقت تحديث القيمة الفعلية',
 };
 const USER_COLUMNS = {
   username: 'اسم المستخدم', name: 'الاسم', role: 'الصلاحية', active: 'مفعّل',
@@ -848,6 +852,10 @@ function deliver_(req, who) {
   const due = dateOnly_(req.due);
   const deliveredAt = status === DELIVERY.delivered ? (dateOnly_(req.at) || today_()) : '';
   const note = safe_(req.note);
+  // The invoice may come out at a different value than the agreed one. The
+  // figure is optional, but a real difference needs a written reason.
+  const actual = actualAmount_(req.actual);
+  const actualNote = safe_(req.actualNote);
   const r = findRequest_(who, req.id);
   requireDeliverer_(who);
   if (text_(r.status) !== STATUS.approved && text_(r.status) !== STATUS.clear) {
@@ -866,6 +874,11 @@ function deliver_(req, who) {
     if (current !== STATUS.approved && current !== STATUS.clear) {
       throw new Error('لا يمكن تسجيل تسليم لطلب لم يُعتمد: ' + current);
     }
+    // Compare against the amount as it stands in the sheet, not the stale copy.
+    const agreed = Number(values[at][headers.indexOf(COLUMNS.amount)]) || 0;
+    if (actual !== '' && Math.abs(actual - agreed) >= 1 && !actualNote) {
+      throw new Error('اكتب سبب اختلاف القيمة الفعلية عن القيمة المتفق عليها.');
+    }
     const row = values[at].slice();
     const put = function (field, value) {
       const col = headers.indexOf(COLUMNS[field]);
@@ -880,10 +893,39 @@ function deliver_(req, who) {
     put('deliveryNote', status ? note : '');
     put('deliveryBy', status ? safe_(publicName_(who)) : '');
     put('deliveryUpdatedAt', now_());
+    // Only stamp who changed the actual value, and when, when it really changed.
+    const prevActual = storedActual_(values[at][headers.indexOf(COLUMNS.actualAmount)]);
+    put('actualAmount', actual);
+    put('actualNote', actual === '' ? '' : actualNote);
+    if (String(prevActual) !== String(actual)) {
+      put('actualBy', actual === '' ? '' : safe_(publicName_(who)));
+      put('actualAt', actual === '' ? '' : now_());
+    }
     audit_(publicName_(who), 'تحديث التسليم',
-      text_(req.id) + ' · ' + before + ' → ' + (status || 'لم يبدأ') + (reason ? ' · ' + reason : ''));
+      text_(req.id) + ' · ' + before + ' → ' + (status || 'لم يبدأ')
+      + (reason ? ' · ' + reason : '')
+      + (actual !== '' ? ' · الفعلي: ' + actual + (actualNote ? ' · ' + actualNote : '') : ''));
     return rowToObject_(headers, row);
   });
+}
+
+// An optional money figure: empty clears it, otherwise it must be a real,
+// non-negative number. Two decimals are kept so cents survive the round trip.
+function actualAmount_(v) {
+  const s = text_(v).replace(/,/g, '');
+  if (!s) return '';
+  const n = Number(s);
+  if (!isFinite(n)) throw new Error('القيمة الفعلية يجب أن تكون رقمًا.');
+  if (n < 0) throw new Error('القيمة الفعلية لا تكون سالبة.');
+  return Math.round(n * 100) / 100;
+}
+
+// The stored figure may have been typed by hand, so never fail on it.
+function storedActual_(v) {
+  const s = text_(v).replace(/,/g, '');
+  if (!s) return '';
+  const n = Number(s);
+  return isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : s;
 }
 
 function dateOnly_(v) {

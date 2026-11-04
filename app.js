@@ -277,6 +277,28 @@
       + (wasLate ? `<span class="sub late">سُلّم متأخرًا ${wasLate} يوم</span>` : '');
   }
 
+  // The invoice may be issued at a different value than the agreed one.
+  function hasActual(r) {
+    return !!r && r.actualAmount !== '' && r.actualAmount != null && isFinite(Number(r.actualAmount));
+  }
+
+  function actualDiff(r) {
+    return hasActual(r) ? Number(r.actualAmount) - (Number(r.amount) || 0) : null;
+  }
+
+  function actualDiffText(diff) {
+    if (diff == null) return '';
+    if (Math.abs(diff) < 0.005) return 'مطابق للمتفق عليه';
+    return diff > 0 ? `أعلى بـ ${money(diff)}` : `أقل بـ ${money(-diff)}`;
+  }
+
+  function actualCell(r) {
+    if (!hasActual(r)) return '<span class="sub">لم تُسجل</span>';
+    const diff = actualDiff(r);
+    return `<span class="actual">الفعلي ${money(r.actualAmount)}</span>`
+      + `<span class="sub ${diff > 0 ? 'diff-up' : diff < 0 ? 'diff-down' : ''}">${actualDiffText(diff)}</span>`;
+  }
+
   function setUser(user) {
     state.user = user;
     const scope = user.warehouses && user.warehouses.length ? user.warehouses.join('، ') : 'كل المخازن';
@@ -1072,6 +1094,7 @@
       status: $('requestStatus').value,
       delivery: $('requestDelivery').value,
       late: $('requestLate').checked,
+      actual: $('requestActual').value,
       from: $('requestFrom').value,
       to: $('requestTo').value,
       q: $('requestQuery').value.trim().toLowerCase(),
@@ -1083,11 +1106,15 @@
     if (f.delivery === 'none' && r.deliveryStatus) return false;
     if (f.delivery && f.delivery !== 'none' && r.deliveryStatus !== f.delivery) return false;
     if (f.late && deliveryLate(r) === 0) return false;
+    if (f.actual === 'none' && hasActual(r)) return false;
+    if (f.actual === 'diff' && !(hasActual(r) && actualDiff(r) !== 0)) return false;
+    if (f.actual === 'up' && !(hasActual(r) && actualDiff(r) > 0)) return false;
+    if (f.actual === 'down' && !(hasActual(r) && actualDiff(r) < 0)) return false;
     const day = String(r.createdAt || '').slice(0, 10);
     if (f.from && day < f.from) return false;
     if (f.to && day > f.to) return false;
     if (!f.q) return true;
-    return [r.id, r.customer, r.account, r.rep, r.requester, r.note, r.deliveryReason]
+    return [r.id, r.customer, r.account, r.rep, r.requester, r.note, r.deliveryReason, r.actualNote]
       .some((v) => String(v == null ? '' : v).toLowerCase().includes(f.q));
   }
 
@@ -1107,11 +1134,18 @@
       const since = String(r.decidedAt || r.createdAt || '').slice(0, 10);
       return Math.max(m, since ? Math.max(0, dayDiff(todayStr(), since)) : 0);
     }, 0);
+    const withActual = state.requests.filter(hasActual);
+    const actualTotal = withActual.reduce((s, r) => s + Number(r.actualAmount), 0);
+    const diffTotal = withActual.reduce((s, r) => s + actualDiff(r), 0);
     $('requestsCount').innerHTML = `<span class="chip">${money(list.length)} طلب</span>`
       + `<span class="chip warn">قيد الاعتماد ${money(pending.length)} · ${money(pendingTotal)}</span>`
       + `<span class="chip">قيد التسليم ${money(undelivered.length)}</span>`
       + (late.length ? `<span class="chip stop">متأخر ${money(late.length)}</span>` : '')
-      + (oldest ? `<span class="chip">أقدم غير مسلّم ${oldest} يوم</span>` : '');
+      + (oldest ? `<span class="chip">أقدم غير مسلّم ${oldest} يوم</span>` : '')
+      + (withActual.length
+        ? `<span class="chip ${Math.abs(diffTotal) >= 1 ? 'warn' : 'ok'}">الفعلي ${money(actualTotal)}`
+          + (Math.abs(diffTotal) >= 1 ? ` · فرق ${money(diffTotal)}` : '') + '</span>'
+        : '');
     const shown = list.slice(0, state.requestShown);
     $('requestsMore').hidden = shown.length >= list.length;
     if (!list.length) {
@@ -1126,7 +1160,7 @@
       <tr tabindex="0" data-review="${esc(r.id)}">
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
         <td><button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button><span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
-        <td class="n">${money(r.amount)}</td>
+        <td class="n">${money(r.amount)}${hasActual(r) ? `<span class="sub actual-line">${actualCell(r)}</span>` : ''}</td>
         <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span><span class="sub">${esc(r.reasons)}</span></td>
         <td>${esc(r.requester)}${r.note ? `<span class="sub">${esc(r.note)}</span>` : ''}</td>
         <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>
@@ -1143,11 +1177,14 @@
   }
 
   function exportRequests() {
-    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة', 'الفحص', 'الأسباب', 'الحالة', 'مقدم الطلب', 'تاريخ الطلب',
+    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة المتفق عليها', 'القيمة الفعلية', 'فرق القيمة', 'سبب اختلاف القيمة',
+      'الفحص', 'الأسباب', 'الحالة', 'مقدم الطلب', 'تاريخ الطلب',
       'المعتمد', 'تاريخ الاعتماد', 'ملاحظات القرار', 'ملاحظة الطلب',
       'حالة التسليم', 'موعد التسليم', 'تاريخ التسليم', 'تأخير التسليم (يوم)', 'سبب التأخير', 'ملاحظات التسليم'];
     const rows = filteredRequests().map((r) => [
-      r.id, r.customer, r.account, r.rep, Math.round(Number(r.amount) || 0), r.verdict, r.reasons || '',
+      r.id, r.customer, r.account, r.rep, Math.round(Number(r.amount) || 0),
+      hasActual(r) ? Number(r.actualAmount) : '', hasActual(r) ? Math.round(actualDiff(r) * 100) / 100 : '', r.actualNote || '',
+      r.verdict, r.reasons || '',
       r.status, r.requester, r.createdAt, r.approver || '', r.decidedAt || '', r.decisionNote || '', r.note || '',
       r.deliveryStatus || '', r.deliveryDue || '', r.deliveryAt || '', deliveryLate(r) || '', r.deliveryReason || '', r.deliveryNote || '',
     ]);
@@ -1303,6 +1340,25 @@
           <h3>التسليم</h3>
           <p class="sub">${r.status === 'مرفوض' ? 'لا ينطبق: الطلب مرفوض.' : 'يبدأ التسليم بعد اعتماد الطلب.'}</p>
         </section>`;
+    // The agreed value is fixed; the invoice value is recorded beside it.
+    const actual = hasActual(r)
+      ? `<section class="review-block full">
+          <h3>القيمة الفعلية</h3>
+          <dl>
+            ${reviewNum('القيمة المتفق عليها', r.amount)}
+            ${reviewNum('القيمة الفعلية', r.actualAmount)}
+            <dt>الفرق</dt><dd class="${actualDiff(r) > 0 ? 'diff-up' : actualDiff(r) < 0 ? 'diff-down' : ''}">${actualDiffText(actualDiff(r))}</dd>
+          </dl>
+          ${r.actualNote ? `<div class="review-note"><strong>سبب الاختلاف</strong>${esc(r.actualNote)}</div>` : ''}
+          ${r.actualBy ? `<div class="review-note"><strong>آخر تحديث للقيمة</strong>${esc(r.actualBy)} · ${esc(r.actualAt || '')}</div>` : ''}
+        </section>`
+      : deliveryApplies(r)
+        ? `<section class="review-block full">
+            <h3>القيمة الفعلية</h3>
+            <dl>${reviewNum('القيمة المتفق عليها', r.amount)}</dl>
+            <p class="sub">لم تُسجل القيمة الفعلية بعد.</p>
+          </section>`
+        : '';
     return `
       ${notice ? `<div class="review-notice">${esc(notice)}</div>` : ''}
       <section class="review-block">
@@ -1339,6 +1395,7 @@
         <div class="review-note"><strong>أسباب الفحص</strong>${r.reasons ? esc(r.reasons) : 'لا توجد ملاحظات.'}</div>
       </section>
       ${delivery}
+      ${actual}
       <section class="review-block full">
         <h3>القرار</h3>
         ${decision}
@@ -1351,8 +1408,32 @@
     $('deliveryAt').value = r.deliveryAt || '';
     $('deliveryReason').value = r.deliveryReason || '';
     $('deliveryNote').value = r.deliveryNote || '';
+    $('deliveryActual').value = hasActual(r) ? String(r.actualAmount) : '';
+    $('deliveryActualNote').value = r.actualNote || '';
     $('deliveryError').hidden = true;
     $('deliveryMsg').textContent = '';
+    updateActualDiff();
+  }
+
+  // Live difference between the agreed and the actual value.
+  function updateActualDiff() {
+    const agreed = state.deciding ? Number(state.deciding.amount) || 0 : 0;
+    const raw = $('deliveryActual').value.trim();
+    const el = $('deliveryActualDiff');
+    if (!raw) {
+      el.textContent = 'لم تُسجل القيمة الفعلية.';
+      el.className = 'sub';
+      return;
+    }
+    const n = Number(raw);
+    if (!isFinite(n)) {
+      el.textContent = 'القيمة الفعلية يجب أن تكون رقمًا.';
+      el.className = 'sub diff-up';
+      return;
+    }
+    const diff = n - agreed;
+    el.textContent = actualDiffText(diff);
+    el.className = 'sub ' + (Math.abs(diff) < 0.005 ? '' : diff > 0 ? 'diff-up' : 'diff-down');
   }
 
   function deliveryError(text) {
@@ -1412,6 +1493,19 @@
       deliveryError('اختر سبب تعذر التسليم.');
       return;
     }
+    const actualRaw = $('deliveryActual').value.trim();
+    const actualNote = $('deliveryActualNote').value.trim();
+    if (actualRaw) {
+      const n = Number(actualRaw);
+      if (!isFinite(n) || n < 0) {
+        deliveryError('القيمة الفعلية يجب أن تكون رقمًا غير سالب.');
+        return;
+      }
+      if (Math.abs(n - (Number(r.amount) || 0)) >= 1 && !actualNote) {
+        deliveryError('اكتب سبب اختلاف القيمة الفعلية عن القيمة المتفق عليها.');
+        return;
+      }
+    }
     // Delivered without a date means today; the server applies the same rule.
     if (status === DELIVERY.delivered && !$('deliveryAt').value) $('deliveryAt').value = todayStr();
     $('deliverySave').disabled = true;
@@ -1423,6 +1517,7 @@
         due: $('deliveryDue').value,
         at: $('deliveryAt').value,
         reason, note: $('deliveryNote').value,
+        actual: actualRaw, actualNote,
       });
       const updated = data.request;
       state.requests = state.requests.map((x) => (x.id === updated.id ? updated : x));
@@ -1680,7 +1775,7 @@
   $('logout').addEventListener('click', logout);
   $('demo').addEventListener('click', loadDemo);
   $('reload').addEventListener('click', () => (state.isDemo ? loadDemo() : loadData()));
-  for (const id of ['requestStatus', 'requestDelivery', 'requestLate', 'requestFrom', 'requestTo', 'requestQuery']) {
+  for (const id of ['requestStatus', 'requestDelivery', 'requestLate', 'requestActual', 'requestFrom', 'requestTo', 'requestQuery']) {
     $(id).addEventListener(id === 'requestQuery' ? 'input' : 'change', () => {
       state.requestShown = REQUEST_PAGE;
       renderRequests();
@@ -1749,6 +1844,7 @@
   $('decisionRetry').addEventListener('click', () => { if (state.deciding && state.decisionCanAct) loadDecisionCheck(state.deciding); });
   $('decisionClose').addEventListener('click', () => $('decision').close());
   $('deliverySave').addEventListener('click', saveDelivery);
+  $('deliveryActual').addEventListener('input', updateActualDiff);
   $('deliveryStatus').addEventListener('change', () => {
     if ($('deliveryStatus').value === DELIVERY.delivered && !$('deliveryAt').value) {
       $('deliveryAt').value = todayStr();
