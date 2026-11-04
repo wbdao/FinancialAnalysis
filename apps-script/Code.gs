@@ -171,6 +171,14 @@ const PROMISE_COLUMNS = {
   note: 'ملاحظة', createdAt: 'تاريخ الإنشاء', createdBy: 'أنشأه', updatedAt: 'آخر تحديث', updatedBy: 'حدّثه',
 };
 
+const PLANS_COLUMNS = {
+  name: 'طريقة السداد',
+  count: 'عدد الفعات',
+  daysPerInstallment: 'عدد الايام لكل دفعه',
+  advancePercent: 'نسبة الدفعه المقدمه',
+  note: 'ملاحظات',
+};
+
 function doGet() {
   return json_({ ok: true, build: BUILD });
 }
@@ -815,7 +823,12 @@ function plansSheet_() {
     try { books.push(SpreadsheetApp.openById(PLANS_SHEET_ID)); } catch (e) { return null; }
   } else {
     try { books.push(sourceBook_()); } catch (e) { /* no customer link */ }
-    try { books.push(requestsBook_()); } catch (e) { /* not linked */ }
+    try { 
+      const rb = requestsBook_();
+      books.push(rb);
+      // Try to create the sheet if it doesn't exist
+      try { ensureSheet_(rb, PLANS_TAB, PLANS_COLUMNS); } catch (e) { /* ignore */ }
+    } catch (e) { /* not linked */ }
   }
   for (let b = 0; b < books.length; b++) {
     const tabs = books[b].getSheets();
@@ -853,9 +866,9 @@ function paymentPlans_() {
   const nameCol = at(['PaymentSchedule', 'طريقة السداد', 'طرق السداد', 'الخطة', 'خطة السداد', 'Name', 'Plan']);
   if (nameCol < 0) return [];
   const weeksCol = at(['weekNum', 'عدد الأسابيع', 'الأسابيع', 'Weeks']);
-  const countCol = at(['PayQuantity', 'عدد الدفعات', 'الدفعات', 'Payments', 'Installments']);
-  const daysCol = at(['Days', 'الأيام', 'أيام', 'Period', 'PeriodDays']);
-  const startCol = at(['25%Start', 'Start', 'StartPercent', 'نسبة المقدمة', 'نسبة الدفعة المقدمة']);
+  const countCol = at(['PayQuantity', 'عدد الفعات', 'عدد الدفعات', 'عددالفعات', 'الدفعات', 'عدد الأقساط', 'Payments', 'Installments']);
+  const daysCol = at(['Days', 'عدد الايام لكل دفعه', 'عدد الأيام لكل دفعة', 'الأيام', 'أيام', 'Period', 'PeriodDays']);
+  const startCol = at(['25%Start', 'Start', 'StartPercent', 'نسبة الدفعه المقدمه', 'نسبة الدفعة المقدمة', 'نسبة المقدمة']);
   const advanceCol = at(['AdvancePayment', 'مبلغ المقدمة', 'قيمة المقدمة', 'الدفعة المقدمة', 'DownPayment']);
   const weeklyCol = at(['WeeklyPayment', 'الدفعة الأسبوعية', 'القسط الأسبوعي', 'مبلغ الأسبوع']);
   const noteCol = at(['ملاحظات', 'Note', 'Notes']);
@@ -972,7 +985,8 @@ function evaluate_(who, account, amount) {
     if (sheets.base.length < 2) throw new Error('العميل غير موجود في قاعدة العملاء أو خارج نطاق مخازنك: ' + account);
     // Unlike the screens, a request is never checked without the checks: a failure stops it.
     if (sheets.checksError) throw new Error(sheets.checksError);
-    c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, sheets.checks).customers[0];
+    const plans = typeof paymentPlans_ === 'function' ? paymentPlans_() : [];
+    c = Engine.analyze(sheets.base, sheets.tx, rules, sheets.analysisDay, sheets.checks, plans).customers[0];
     analysisDay = sheets.analysisDay;
     try { cache.put(key, JSON.stringify({ c: slimCustomer_(c), day: analysisDay }), EVAL_TTL); } catch (e) { /* the cache is optional */ }
   }
@@ -1129,6 +1143,16 @@ function promisesSheet_() {
   return ensureSheet_(requestsBook_(), PROMISE_TAB, PROMISE_COLUMNS);
 }
 
+
+function plansSheetEnsure_() {
+  try {
+    const book = requestsBook_();
+    return ensureSheet_(book, PLANS_TAB, PLANS_COLUMNS);
+  } catch (e) {
+    return null;
+  }
+}
+
 function promiseField_(header) {
   return Object.keys(PROMISE_COLUMNS).filter(function (f) { return PROMISE_COLUMNS[f] === header; })[0];
 }
@@ -1187,7 +1211,8 @@ function promiseCustomer_(who, account) {
   if (!code) throw new Error('كود العميل مطلوب.');
   const sheets = scopedSheets_(who, code);
   if (sheets.base.length < 2) throw new Error('العميل غير موجود أو خارج نطاق مخازنك: ' + code);
-  const c = Engine.analyze(sheets.base, sheets.tx, rules_(), sheets.analysisDay, sheets.checks).customers[0];
+  const plans = typeof paymentPlans_ === 'function' ? paymentPlans_() : [];
+  const c = Engine.analyze(sheets.base, sheets.tx, rules_(), sheets.analysisDay, sheets.checks, plans).customers[0];
   if (!c) throw new Error('العميل غير موجود أو خارج نطاق مخازنك: ' + code);
   return c;
 }

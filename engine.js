@@ -23,7 +23,7 @@
   const BASE_COLS = {
     account: ['Account'], name: ['Name'], warehouse: ['Warehouse Group'], group: ['Customer group'],
     guarantee: ['Eligible credit limit', 'الضمان'], creditLimit: ['Credit limit'], baseBalance: ['Balance'],
-    terms: ['Payment schedule'], rep: ['Worker Name'], idNumber: ['ID number'],
+    terms: ['Payment schedule'], paymentMethod: ['طريقة السداد', 'طرق السداد'], rep: ['Worker Name'], idNumber: ['ID number'],
   };
   const TX_COLS = {
     account: ['Account'], voucher: ['voucher'], kind: ['Transaction type'], date: ['Date'],
@@ -152,9 +152,28 @@
    * @param {?{main: ?Array<!Array>, wh: ?Array<!Array>}=} checkRows the checks tabs,
    *     header first. Without them every check figure is zero and the results are unchanged.
    */
-  function analyze(baseRows, txRows, rulesIn, analysisDayIn, checkRows) {
+  function analyze(baseRows, txRows, rulesIn, analysisDayIn, checkRows, paymentPlans) {
     const rules = Object.assign({}, DEFAULT_RULES, rulesIn);
     const bi = mapHeader(baseRows[0] || [], BASE_COLS, REQUIRED.base, 'قاعدة العملاء');
+    const plans = Array.isArray(paymentPlans) ? paymentPlans : [];
+    const planMap = {};
+    for (let i = 0; i < plans.length; i++) {
+      const p = plans[i] || {};
+      const key = str(p.name || p.method || p.paymentMethod || p.planName || p['طريقة السداد']).toLowerCase();
+      if (key) planMap[key] = p;
+    }
+    function planDaysFor(code, method) {
+      const m = str(method).toLowerCase();
+      if (m && planMap[m]) {
+        const pm = planMap[m];
+        const cnt = num(pm.count || pm.installments || pm.numPayments || pm['عدد الفعات'] || pm['عدد الدعات']);
+        const dper = num(pm.daysPerInstallment || pm.days || pm.periodDays || pm['عدد الايام لكل دعه'] || pm['عدد الأيام لكل دعة']);
+        if (dper > 0 && cnt > 0) return Math.round(dper * cnt);
+        if (dper > 0) return Math.round(dper);
+        if (cnt > 0 && dper > 0) return Math.round(cnt * dper);
+      }
+      return termDays(code);
+    }
     const ti = mapHeader(txRows[0] || [], TX_COLS, REQUIRED.tx, 'حركات العملاء');
     const pick = (row, i) => (i >= 0 ? row[i] : '');
     const issues = {
@@ -205,7 +224,7 @@
     const add = (base) => {
       if (seen.has(base.account)) return;
       seen.add(base.account);
-      const c = computeCustomer(base, txByAccount.get(base.account) || [], analysisDay, rules, checksByAccount.get(base.account) || []);
+      const c = computeCustomer(base, txByAccount.get(base.account) || [], analysisDay, rules, checksByAccount.get(base.account) || [], planDaysFor);
       c.hasChecks = hasChecks;
       customers.push(c);
     };
@@ -218,14 +237,14 @@
         account, name: str(pick(row, bi.name)) || account, warehouse: str(pick(row, bi.warehouse)), group: str(pick(row, bi.group)),
         creditLimit: num(pick(row, bi.creditLimit)), guarantee: Math.max(0, num(pick(row, bi.guarantee))),
         baseBalance: bi.baseBalance >= 0 ? num(row[bi.baseBalance]) : null,
-        terms: str(pick(row, bi.terms)), rep: str(pick(row, bi.rep)) || 'بدون مندوب', idNumber: str(pick(row, bi.idNumber)), inBase: true,
+        terms: str(pick(row, bi.terms)), paymentMethod: bi.paymentMethod >= 0 ? str(pick(row, bi.paymentMethod)) : '', rep: str(pick(row, bi.rep)) || 'بدون مندوب', idNumber: str(pick(row, bi.idNumber)), inBase: true,
       });
     }
     // Accounts that move but are missing from the customer base still count.
     for (const account of txByAccount.keys()) {
       if (seen.has(account)) continue;
       issues.notInBase++;
-      add({ account, name: account, warehouse: '', group: '', creditLimit: 0, guarantee: 0, baseBalance: null, terms: '', rep: 'بدون مندوب', idNumber: '', inBase: false });
+      add({ account, name: account, warehouse: '', group: '', creditLimit: 0, guarantee: 0, baseBalance: null, terms: '', paymentMethod: '', rep: 'بدون مندوب', idNumber: '', inBase: false });
     }
     issues.balanceDiffs = customers.filter((c) => c.baseBalance != null && Math.abs(c.baseBalance - c.balance) >= 1).length;
     // Open checks of accounts unknown to the customer base add to nobody's exposure.
@@ -237,9 +256,9 @@
     return { customers, invoices, analysisDay, rules, issues, summary };
   }
 
-  function computeCustomer(base, list, analysisDay, rules, checks) {
+  function computeCustomer(base, list, analysisDay, rules, checks, planDaysForFn) {
     const c = Object.assign({}, base, {
-      contractDays: termDays(base.terms), balance: 0, unapplied: 0, overdue: 0, oldestOverdueDays: 0,
+      contractDays: (planDaysForFn || termDays)(base.terms, base.paymentMethod), balance: 0, unapplied: 0, overdue: 0, oldestOverdueDays: 0,
       aging: [0, 0, 0, 0, 0, 0], invoices: [],
     });
     c.stopped = /stop/i.test(c.terms) || /^stoped/i.test(c.group);
