@@ -33,7 +33,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-06-a11';
+const BUILD = '2026-11-06-a12';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -56,12 +56,22 @@ const DELIVERY_REASONS = [
 ];
 
 const ROLE_USER = 'موظف', ROLE_APPROVER = 'معتمد', ROLE_ADMIN = 'مدير', ROLE_DELIVERY = 'محاسب مخزن';
+const ROLE_VIEWER = 'مشاهد', ROLE_CUSTOM = 'مخصص';
 const ROLES = [ROLE_USER, ROLE_APPROVER, ROLE_DELIVERY, ROLE_ADMIN];
+// A user may hold any mix of these instead of one fixed role. Viewing is open
+// to every signed-in user; the rest are granted one by one.
+const PERM = {
+  add: 'تسجيل الطلبات',
+  approve: 'اعتماد الطلبات',
+  deliver: 'متابعة التسليم',
+  admin: 'إدارة النظام',
+};
+const PERM_LIST = [PERM.add, PERM.approve, PERM.deliver, PERM.admin];
 const ALL_WAREHOUSES = 'الكل';
 const BREAK_GLASS = '*admin*';
 const LOGIN_NEEDED = 'سجّل الدخول من جديد.';
 const SESSION_SECONDS = 6 * 60 * 60;        // أقصى مدة في CacheService
-const USERS_CACHE = 'users:v1';
+const USERS_CACHE = 'users:v2';
 const USERS_TTL = 5 * 60;
 const HASH_ROUNDS = 2000;
 const MIN_PASSWORD = 8;
@@ -129,6 +139,7 @@ const COLUMNS = {
 const USER_COLUMNS = {
   username: 'اسم المستخدم', name: 'الاسم', role: 'الصلاحية', active: 'مفعّل',
   warehouses: 'المخازن', hash: 'كلمة السر (مشفرة)', salt: 'Salt',
+  permissions: 'الصلاحيات',
 };
 
 function doGet() {
@@ -184,7 +195,7 @@ function locked_(fn) {
 }
 
 function requireAdmin_(who) {
-  if (who.role !== ROLE_ADMIN) throw new Error('هذه العملية للمدير فقط.');
+  if (!hasPerm_(who, PERM.admin)) throw new Error('هذه العملية تتطلب صلاحية إدارة النظام.');
 }
 
 /* ---- sessions and passwords ---- */
@@ -267,7 +278,10 @@ function changePassword_(req, who) {
 }
 
 function breakGlass_() {
-  return { username: BREAK_GLASS, name: 'المدير', role: ROLE_ADMIN, warehouses: [], active: true };
+  return {
+    username: BREAK_GLASS, name: 'المدير', role: ROLE_ADMIN, warehouses: [], active: true,
+    permissions: PERM_LIST.slice(),
+  };
 }
 
 function publicName_(who) { return who.username === BREAK_GLASS ? 'المدير (admin)' : who.name; }
@@ -276,6 +290,7 @@ function publicUser_(who) {
   return {
     username: who.username === BREAK_GLASS ? 'admin' : who.username,
     name: who.name, role: who.role, warehouses: who.warehouses,
+    permissions: who.permissions || [],
   };
 }
 
@@ -314,8 +329,13 @@ function users_() {
       const k = normUser_(r[at('username')]);
       if (!k || out[k]) return;
       const role = text_(r[at('role')]);
+      // The permissions column wins. An older row without it keeps the role
+      // it already had, so nothing changes until the admin edits that user.
+      const saved = parsePermissions_(r[at('permissions')]);
+      const permissions = saved === null ? rolePermissions_(role) : normalizePermissions_(saved);
       out[k] = {
-        username: k, name: text_(r[at('name')]) || k, role: ROLES.indexOf(role) >= 0 ? role : ROLE_USER,
+        username: k, name: text_(r[at('name')]) || k, role: roleForPermissions_(permissions),
+        permissions: permissions,
         active: isYes_(r[at('active')]), warehouses: parseWarehouses_(r[at('warehouses')]),
         hash: text_(r[at('hash')]), salt: text_(r[at('salt')]), row: i + 2,
       };
@@ -323,6 +343,47 @@ function users_() {
   }
   try { cache.put(USERS_CACHE, JSON.stringify(out), USERS_TTL); } catch (e) { /* the cache is optional */ }
   return out;
+}
+
+// null means the cell is empty, so the role decides.
+function parsePermissions_(v) {
+  const s = text_(v);
+  if (!s) return null;
+  const parts = s.split(/[،,]/).map(text_).filter(Boolean);
+  return PERM_LIST.filter(function (p) { return parts.indexOf(p) >= 0; });
+}
+
+// «إدارة النظام» carries every other permission, so it is stored expanded.
+function normalizePermissions_(list) {
+  if (list.indexOf(PERM.admin) >= 0) return PERM_LIST.slice();
+  return PERM_LIST.filter(function (p) { return list.indexOf(p) >= 0; });
+}
+
+function rolePermissions_(role) {
+  if (role === ROLE_ADMIN) return PERM_LIST.slice();
+  if (role === ROLE_APPROVER) return [PERM.add, PERM.approve, PERM.deliver];
+  if (role === ROLE_DELIVERY) return [PERM.deliver];
+  if (role === ROLE_VIEWER || role === ROLE_CUSTOM) return [];
+  return [PERM.add];
+}
+
+// The role column stays as a readable label for the permission set.
+function roleForPermissions_(list) {
+  if (list.indexOf(PERM.admin) >= 0) return ROLE_ADMIN;
+  const set = PERM_LIST.filter(function (p) { return list.indexOf(p) >= 0; });
+  const key = set.join('|');
+  if (!key) return ROLE_VIEWER;
+  if (key === [PERM.add].join('|')) return ROLE_USER;
+  if (key === [PERM.deliver].join('|')) return ROLE_DELIVERY;
+  if (key === [PERM.add, PERM.approve, PERM.deliver].join('|')) return ROLE_APPROVER;
+  return ROLE_CUSTOM;
+}
+
+function hasPerm_(who, p) {
+  if (!who) return false;
+  if (who.username === BREAK_GLASS) return true;
+  const list = who.permissions || [];
+  return list.indexOf(p) >= 0 || list.indexOf(PERM.admin) >= 0;
 }
 
 function clearUsersCache_() { CacheService.getScriptCache().remove(USERS_CACHE); }
@@ -344,28 +405,56 @@ function usersList_() {
   const us = users_();
   return Object.keys(us).map(function (k) {
     const u = us[k];
-    return { username: u.username, name: u.name, role: u.role, active: u.active, warehouses: u.warehouses };
+    return {
+      username: u.username, name: u.name, role: u.role, permissions: u.permissions,
+      active: u.active, warehouses: u.warehouses,
+    };
   });
+}
+
+// A request may carry an explicit permission list. An older client that sends
+// only a role still works, and that role seeds the same permissions as before.
+function requestedPermissions_(req) {
+  if (Array.isArray(req.permissions) || typeof req.permissions === 'string') {
+    const raw = Array.isArray(req.permissions) ? req.permissions : String(req.permissions).split(/[،,]/);
+    const list = raw.map(text_).filter(Boolean);
+    list.forEach(function (p) {
+      if (PERM_LIST.indexOf(p) < 0) throw new Error('صلاحية غير معروفة: ' + p);
+    });
+    return normalizePermissions_(list);
+  }
+  if (ROLES.indexOf(req.role) < 0) throw new Error('الصلاحية يجب أن تكون: ' + ROLES.join(' أو '));
+  return rolePermissions_(req.role);
 }
 
 function userSave_(req, who) {
   const k = normUser_(req.username);
   if (!/^[a-z0-9._-]{3,30}$/.test(k)) throw new Error('اسم المستخدم من 3 إلى 30 حرفًا إنجليزيًا أو رقمًا، بدون مسافات.');
   if (k === 'admin') throw new Error('اسم المستخدم admin محجوز للدخول الاحتياطي.');
-  if (ROLES.indexOf(req.role) < 0) throw new Error('الصلاحية يجب أن تكون: ' + ROLES.join(' أو '));
+  const permissions = requestedPermissions_(req);
+  const role = roleForPermissions_(permissions);
   const pass = String(req.password || '');
   if (pass && pass.length < MIN_PASSWORD) throw new Error('كلمة المرور يجب ألا تقل عن ' + MIN_PASSWORD + ' أحرف.');
-  if (k === who.username && (req.active === false || req.role !== ROLE_ADMIN)) {
-    throw new Error('لا يمكنك إيقاف حسابك أو إزالة صلاحية المدير من نفسك.');
+  if (k === who.username && (req.active === false || permissions.indexOf(PERM.admin) < 0)) {
+    throw new Error('لا يمكنك إيقاف حسابك أو إزالة صلاحية إدارة النظام من نفسك.');
   }
   clearUsersCache_();
   const existing = users_()[k];
   if (!existing && !pass) throw new Error('المستخدم الجديد يحتاج كلمة مرور.');
+  // Never leave the system without an active administrator.
+  if (existing && existing.active && hasPerm_(existing, PERM.admin)
+    && (permissions.indexOf(PERM.admin) < 0 || req.active === false)) {
+    const others = Object.keys(users_()).filter(function (x) {
+      return x !== k && users_()[x].active && hasPerm_(users_()[x], PERM.admin);
+    });
+    if (!others.length) throw new Error('لا يمكن إزالة صلاحية إدارة النظام من آخر مدير مفعّل.');
+  }
   const sh = usersSheet_();
   const headers = headers_(sh);
   const list = (Array.isArray(req.warehouses) ? req.warehouses : []).map(text_).filter(Boolean);
   const fields = {
-    username: k, name: safe_(req.name) || k, role: req.role, active: req.active !== false,
+    username: k, name: safe_(req.name) || k, role: role, active: req.active !== false,
+    permissions: permissions.length ? permissions.join('، ') : '',
     warehouses: list.length ? list.join('، ') : ALL_WAREHOUSES,
   };
   if (pass) {
@@ -384,7 +473,8 @@ function userSave_(req, who) {
   }
   clearUsersCache_();
   audit_(publicName_(who), existing ? 'تعديل مستخدم' : 'إضافة مستخدم',
-    k + ' · ' + fields.role + ' · ' + fields.warehouses + (fields.active ? '' : ' · متوقف') + (pass ? ' · كلمة مرور جديدة' : ''));
+    k + ' · ' + (permissions.length ? permissions.join('، ') : 'عرض فقط')
+    + ' · ' + fields.warehouses + (fields.active ? '' : ' · متوقف') + (pass ? ' · كلمة مرور جديدة' : ''));
   return usersList_();
 }
 
@@ -735,6 +825,7 @@ function evaluate_(who, account, amount) {
 /* ---- requests ---- */
 
 function add_(req, who) {
+  if (!hasPerm_(who, PERM.add)) throw new Error('لا تملك صلاحية تسجيل الطلبات.');
   const account = text_(req.account);
   const amount = Number(req.amount);
   if (!account) throw new Error('كود العميل مطلوب.');
@@ -785,9 +876,9 @@ function findRequest_(who, id) {
 }
 
 function requireDecider_(who, r) {
-  if (who.role !== ROLE_APPROVER && who.role !== ROLE_ADMIN) throw new Error('الاعتماد لصلاحية معتمد أو مدير.');
-  // The admin may, so that a one-person setup can still work.
-  if (who.role !== ROLE_ADMIN && normUser_(r.requesterUser) === who.username) throw new Error('لا يمكنك اعتماد طلب قدّمته بنفسك.');
+  if (!hasPerm_(who, PERM.approve)) throw new Error('اعتماد الطلبات يتطلب صلاحية اعتماد الطلبات.');
+  // The system administrator may, so that a one-person setup can still work.
+  if (!hasPerm_(who, PERM.admin) && normUser_(r.requesterUser) === who.username) throw new Error('لا يمكنك اعتماد طلب قدّمته بنفسك.');
 }
 
 function recheck_(req, who) {
@@ -833,8 +924,8 @@ function decide_(req, who) {
 }
 
 function requireDeliverer_(who) {
-  if (who.role !== ROLE_DELIVERY && who.role !== ROLE_APPROVER && who.role !== ROLE_ADMIN) {
-    throw new Error('تحديث التسليم لصلاحية محاسب مخزن أو معتمد أو مدير.');
+  if (!hasPerm_(who, PERM.deliver)) {
+    throw new Error('تحديث التسليم يتطلب صلاحية متابعة التسليم.');
   }
 }
 

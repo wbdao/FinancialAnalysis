@@ -87,9 +87,9 @@ test('passwords are stored hashed and never sent back', () => {
 test('only the admin manages users and rules', () => {
   const s = setup();
   const t = s.addUser('amr', 'معتمد');
-  assert.match(s.call(t, 'users').error, /للمدير فقط/);
-  assert.match(s.call(t, 'userSave', { username: 'x12', role: 'مدير', password: 'password-1' }).error, /للمدير فقط/);
-  assert.match(s.call(t, 'setRules', { overLimit: 'warn', stopDays: 1, tolerance: 1 }).error, /للمدير فقط/);
+  assert.match(s.call(t, 'users').error, /إدارة النظام/);
+  assert.match(s.call(t, 'userSave', { username: 'x12', role: 'مدير', password: 'password-1' }).error, /إدارة النظام/);
+  assert.match(s.call(t, 'setRules', { overLimit: 'warn', stopDays: 1, tolerance: 1 }).error, /إدارة النظام/);
 });
 
 test('a user cannot lock themselves out', () => {
@@ -97,6 +97,39 @@ test('a user cannot lock themselves out', () => {
   const t = s.addUser('boss', 'مدير');
   assert.match(s.call(t, 'userSave', { username: 'boss', role: 'موظف' }).error, /من نفسك/);
   assert.match(s.call(t, 'userSave', { username: 'boss', role: 'مدير', active: false }).error, /من نفسك/);
+});
+
+test('permissions: a user can hold any mix of features', () => {
+  const s = setup();
+  const save = (username, permissions) => {
+    const r = s.call(s.admin, 'userSave', {
+      username, name: username, permissions, warehouses: [], password: 'password-1',
+    });
+    assert.ok(r.ok, r.error);
+    return s.post({ action: 'login', username, password: 'password-1' }).token;
+  };
+  const approver = save('apr', ['اعتماد الطلبات']);
+  const hybrid = save('hyb', ['تسجيل الطلبات', 'متابعة التسليم']);
+  const viewer = save('view', []);
+  const boss = save('boss', ['إدارة النظام']);
+
+  const id = s.call(hybrid, 'add', { account: 'A1', amount: 3000 }).request.id;
+  assert.match(s.call(approver, 'add', { account: 'B1', amount: 1 }).error, /تسجيل الطلبات/);
+  assert.match(s.call(viewer, 'add', { account: 'B1', amount: 1 }).error, /تسجيل الطلبات/);
+  assert.ok(s.call(viewer, 'list').ok);
+
+  assert.ok(s.call(approver, 'decide', { id, decision: 'approve' }).ok);
+  assert.match(s.call(hybrid, 'decide', { id, decision: 'approve' }).error, /صلاحية اعتماد/);
+  assert.ok(s.call(hybrid, 'deliver', { id, status: 'جاري التسليم', due: '2026-11-05' }).ok);
+  assert.match(s.call(approver, 'deliver', { id, status: 'تم التسليم' }).error, /متابعة التسليم/);
+
+  // «إدارة النظام» carries every other permission.
+  assert.ok(s.call(boss, 'users').ok);
+  assert.ok(s.call(boss, 'add', { account: 'B1', amount: 1 }).ok);
+
+  const listed = s.call(s.admin, 'users').users.find((u) => u.username === 'hyb');
+  assert.deepStrictEqual(listed.permissions, ['تسجيل الطلبات', 'متابعة التسليم']);
+  assert.strictEqual(listed.role, 'مخصص');
 });
 
 test('stopping a user ends their session at once', () => {
@@ -218,7 +251,7 @@ test('decide: role, own requests, scope, single decision and a current check', (
   const own = s.call(approver, 'add', { account: 'A1', amount: 100 }).request.id;
   const decide = (t, reqId, decision, note) => s.call(t, 'decide', { id: reqId, decision, note });
 
-  assert.match(decide(clerk, id, 'approve').error, /معتمد أو مدير/);
+  assert.match(decide(clerk, id, 'approve').error, /صلاحية اعتماد/);
   assert.match(decide(approver, own, 'approve').error, /قدّمته بنفسك/);
   assert.match(decide(outsider, id, 'approve').error, /خارج نطاق/);
   assert.match(decide(approver, id, 'reject', '').error, /سبب الرفض/);
@@ -246,7 +279,7 @@ test('deliver: only a delivery role, only approved, with dates and a reason', ()
   const deliver = (t, extra) => s.call(t, 'deliver', Object.assign({ id }, extra));
 
   assert.match(deliver(delivery, { status: 'في أرضية المخزن' }).error, /لم يُعتمد/);
-  assert.match(deliver(clerk, { status: 'في أرضية المخزن' }).error, /محاسب مخزن/);
+  assert.match(deliver(clerk, { status: 'في أرضية المخزن' }).error, /متابعة التسليم/);
   assert.ok(s.call(approver, 'decide', { id, decision: 'approve' }).ok);
 
   assert.match(deliver(outsider, { status: 'في أرضية المخزن' }).error, /خارج نطاق/);
@@ -395,7 +428,7 @@ test('audit: the admin reads the log newest first, with optional filters', () =>
   assert.strictEqual(one.audit.entries.length, 1);
   assert.ok(one.audit.total >= 3);
 
-  assert.match(s.call(t, 'audit').error, /للمدير فقط/);
+  assert.match(s.call(t, 'audit').error, /إدارة النظام/);
 });
 
 test('source tabs are found despite spaces and spelling, or the real names are listed', () => {
@@ -571,7 +604,7 @@ test('snapshot: sheet edits appear after the trigger or the admin refresh, not b
   assert.strictEqual(s.call(s.admin, 'data').base.length, 4);
 
   s.sourceBook.getSheetByName('قاعده عملاء الشركه').grid.pop();
-  assert.match(s.call(clerk, 'refresh').error, /للمدير فقط/);
+  assert.match(s.call(clerk, 'refresh').error, /إدارة النظام/);
   const r = s.call(s.admin, 'refresh');
   assert.ok(r.ok, r.error);
   assert.ok(r.builtAt >= snapMeta(s).builtAt - 1);

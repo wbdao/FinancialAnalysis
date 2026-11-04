@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=16">
+  <link rel="stylesheet" href="styles.css?v=17">
 </head>
 <body data-view="login">
 
@@ -51,7 +51,7 @@
         <button type="button" data-view="invoices" aria-current="page">
           <svg class="icon"><use href="#i-invoices"></use></svg><span>الفواتير</span>
         </button>
-        <button type="button" data-view="check">
+        <button type="button" data-view="check" data-perm="تسجيل الطلبات">
           <svg class="icon"><use href="#i-check"></use></svg><span>فحص فاتورة جديدة</span>
         </button>
         <button type="button" data-view="checks">
@@ -437,12 +437,24 @@
               <label>الاسم
                 <input id="userName" autocomplete="off" required>
               </label>
-              <label>الصلاحية
-                <select id="userRole">
-                  <option value="موظف">موظف: يفحص ويسجل الطلبات</option>
-                  <option value="معتمد">معتمد: يعتمد الطلبات أيضًا</option>
-                  <option value="محاسب مخزن">محاسب مخزن: متابعة التسليم فقط</option>
-                  <option value="مدير">مدير: كل الصلاحيات والمستخدمون والقواعد</option>
+              <div class="perm-field">
+                <span class="perm-title">الصلاحيات</span>
+                <div class="perm-grid">
+                  <label class="check"><input id="permAdd" type="checkbox"> تسجيل الطلبات</label>
+                  <label class="check"><input id="permApprove" type="checkbox"> اعتماد الطلبات</label>
+                  <label class="check"><input id="permDeliver" type="checkbox"> متابعة التسليم</label>
+                  <label class="check"><input id="permAdmin" type="checkbox"> إدارة النظام</label>
+                </div>
+                <p class="muted perm-hint">كل مستخدم يرى البيانات داخل مخازنه. «إدارة النظام» تمنح كل الصلاحيات.</p>
+              </div>
+              <label>قالب سريع
+                <select id="userPreset">
+                  <option value="">مخصص</option>
+                  <option value="موظف">موظف: تسجيل الطلبات</option>
+                  <option value="معتمد">معتمد: تسجيل واعتماد وتسليم</option>
+                  <option value="محاسب مخزن">محاسب مخزن: متابعة التسليم</option>
+                  <option value="مشاهد">مشاهد: عرض فقط</option>
+                  <option value="مدير">مدير: كل الصلاحيات</option>
                 </select>
               </label>
               <label>المخازن
@@ -470,7 +482,7 @@
               </div>
               <div class="table-wrap">
                 <table>
-                  <thead><tr><th>اسم المستخدم</th><th>الاسم</th><th>الصلاحية</th><th>المخازن</th><th>الحالة</th><th></th></tr></thead>
+                  <thead><tr><th>اسم المستخدم</th><th>الاسم</th><th>الصلاحيات</th><th>المخازن</th><th>الحالة</th><th></th></tr></thead>
                   <tbody id="userRows"></tbody>
                 </table>
               </div>
@@ -604,8 +616,8 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=16"></script>
-  <script src="demo.js?v=16"></script>
-  <script src="app.js?v=16"></script>
+  <script src="engine.js?v=17"></script>
+  <script src="demo.js?v=17"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

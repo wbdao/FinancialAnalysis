@@ -25,6 +25,14 @@
   const ROLE_ADMIN = 'مدير';
   const ROLE_APPROVER = 'معتمد';
   const ROLE_DELIVERY = 'محاسب مخزن';
+  // A user may hold any mix of these; viewing is open to every signed-in user.
+  const PERM = {
+    add: 'تسجيل الطلبات',
+    approve: 'اعتماد الطلبات',
+    deliver: 'متابعة التسليم',
+    admin: 'إدارة النظام',
+  };
+  const PERM_LIST = [PERM.add, PERM.approve, PERM.deliver, PERM.admin];
   // Delivery is tracked beside approval: an approved order can wait in the
   // warehouse for a truck without changing its approval status.
   const DELIVERY = {
@@ -236,10 +244,31 @@
 
   /* ---- session --------------------------------------------------------------- */
 
-  const canDecide = () => !!state.user && (state.user.role === ROLE_ADMIN || state.user.role === ROLE_APPROVER);
-  const canDeliver = () => !!state.user
-    && (state.user.role === ROLE_ADMIN || state.user.role === ROLE_APPROVER || state.user.role === ROLE_DELIVERY);
-  const isAdmin = () => !!state.user && state.user.role === ROLE_ADMIN;
+  // An older server sends no permissions, so the role still seeds them until
+  // the new Code.gs is deployed.
+  function permissionsOf(user) {
+    if (!user) return [];
+    if (Array.isArray(user.permissions)) return user.permissions;
+    if (user.role === ROLE_ADMIN) return PERM_LIST.slice();
+    if (user.role === ROLE_APPROVER) return [PERM.add, PERM.approve, PERM.deliver];
+    if (user.role === ROLE_DELIVERY) return [PERM.deliver];
+    return [PERM.add];
+  }
+
+  function hasPerm(p) {
+    if (state.isDemo && p === PERM.add) return true;
+    return permissionsOf(state.user).includes(p);
+  }
+
+  const canAdd = () => hasPerm(PERM.add);
+  const canDecide = () => hasPerm(PERM.approve);
+  const canDeliver = () => hasPerm(PERM.deliver);
+  const isAdmin = () => hasPerm(PERM.admin);
+
+  function applyPermissions() {
+    document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = !isAdmin(); });
+    document.querySelectorAll('[data-perm]').forEach((el) => { el.hidden = !hasPerm(el.dataset.perm); });
+  }
 
   // Delivery only starts once the request is approved (or needs no approval).
   const deliveryApplies = (r) => !!r && (r.status === 'معتمد' || r.status === 'لا يحتاج اعتماد');
@@ -304,7 +333,7 @@
     const scope = user.warehouses && user.warehouses.length ? user.warehouses.join('، ') : 'كل المخازن';
     $('whoami').textContent = `${user.name} · ${user.role} · ${scope}`;
     $('userAvatar').textContent = (user.name || user.username || '؟').trim().charAt(0);
-    document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = !isAdmin(); });
+    applyPermissions();
   }
 
   function clearData() {
@@ -320,6 +349,7 @@
     showBuild();
     $('userAvatar').textContent = '؟';
     document.querySelectorAll('[data-admin]').forEach((el) => { el.hidden = true; });
+    document.querySelectorAll('[data-perm]').forEach((el) => { el.hidden = true; });
     $('stamp').textContent = 'الائتمان والضمان والمتأخرات';
   }
 
@@ -477,6 +507,7 @@
     $('userAvatar').textContent = 'ت';
     $('loginError').hidden = true;
     signedIn();
+    applyPermissions();
     recompute();
     show('invoices');
   }
@@ -1045,6 +1076,11 @@
   async function sendRequest() {
     const { c, r, amount, ref } = state.lastCheck;
     const msg = $('requestMsg');
+    if (!canAdd()) {
+      msg.className = 'form-error';
+      msg.textContent = 'لا تملك صلاحية تسجيل الطلبات.';
+      return;
+    }
     if (state.isDemo) {
       msg.className = 'form-error';
       msg.textContent = 'لا يمكن تسجيل طلب من البيانات النموذجية.';
@@ -1584,6 +1620,51 @@
 
   /* ---- users (admin) -------------------------------------------------------------- */
 
+  const USER_PRESETS = {
+    'موظف': [PERM.add],
+    'معتمد': [PERM.add, PERM.approve, PERM.deliver],
+    'محاسب مخزن': [PERM.deliver],
+    'مشاهد': [],
+    'مدير': PERM_LIST.slice(),
+  };
+
+  function checkedPerms() {
+    return [
+      [PERM.add, 'permAdd'],
+      [PERM.approve, 'permApprove'],
+      [PERM.deliver, 'permDeliver'],
+      [PERM.admin, 'permAdmin'],
+    ].filter(([, id]) => $(id).checked).map(([p]) => p);
+  }
+
+  function setCheckedPerms(list) {
+    $('permAdd').checked = list.includes(PERM.add);
+    $('permApprove').checked = list.includes(PERM.approve);
+    $('permDeliver').checked = list.includes(PERM.deliver);
+    $('permAdmin').checked = list.includes(PERM.admin);
+    syncAdminLock();
+  }
+
+  // «إدارة النظام» already carries everything, so the other boxes stay fixed.
+  function syncAdminLock() {
+    const on = $('permAdmin').checked;
+    for (const id of ['permAdd', 'permApprove', 'permDeliver']) $(id).disabled = on;
+  }
+
+  function presetOf(list) {
+    const key = (a) => a.slice().sort().join('|');
+    return Object.keys(USER_PRESETS).find((name) => key(USER_PRESETS[name]) === key(list)) || '';
+  }
+
+  function syncPreset() {
+    $('userPreset').value = presetOf(checkedPerms());
+  }
+
+  function applyUserPreset(name) {
+    setCheckedPerms(USER_PRESETS[name] || []);
+    $('userPreset').value = USER_PRESETS[name] ? name : '';
+  }
+
   async function loadUsers() {
     try {
       const data = await callScript('users');
@@ -1599,21 +1680,27 @@
       $('userRows').innerHTML = '<tr><td colspan="6" class="empty">لا يوجد مستخدمون بعد. أضف أول مستخدم من النموذج.</td></tr>';
       return;
     }
-    $('userRows').innerHTML = state.users.map((u) => `
+    $('userRows').innerHTML = state.users.map((u) => {
+      const perms = permissionsOf(u);
+      return `
       <tr>
         <td dir="ltr" class="start">${esc(u.username)}</td>
         <td>${esc(u.name)}</td>
-        <td>${esc(u.role)}</td>
+        <td><div class="perm-list">${perms.length
+          ? perms.map((p) => `<span class="chip">${esc(p)}</span>`).join('')
+          : '<span class="sub">عرض فقط</span>'}</div></td>
         <td>${esc(u.warehouses.length ? u.warehouses.join('، ') : 'الكل')}</td>
         <td><span class="tag ${u.active ? 'ok' : 'paid'}">${u.active ? 'مفعّل' : 'متوقف'}</span></td>
         <td><button type="button" class="ghost" data-user="${esc(u.username)}">تعديل</button></td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
   }
 
   function clearUserForm() {
     $('userForm').reset();
     $('userUsername').readOnly = false;
     $('userError').hidden = true;
+    applyUserPreset('موظف');
   }
 
   function editUser(username) {
@@ -1623,7 +1710,8 @@
     $('userUsername').value = u.username;
     $('userUsername').readOnly = true;
     $('userName').value = u.name;
-    $('userRole').value = u.role;
+    setCheckedPerms(permissionsOf(u));
+    syncPreset();
     $('userWarehouses').value = u.warehouses.join('، ');
     $('userActive').checked = u.active;
     $('userForm').scrollIntoView({ block: 'nearest' });
@@ -1635,7 +1723,10 @@
     $('userError').hidden = true;
     try {
       const data = await callScript('userSave', {
-        username: $('userUsername').value, name: $('userName').value, role: $('userRole').value, active: $('userActive').checked,
+        username: $('userUsername').value, name: $('userName').value, active: $('userActive').checked,
+        // The permission list is authoritative; role stays as a hint for an
+        // older server that has not been deployed yet.
+        permissions: checkedPerms(), role: presetOf(checkedPerms()),
         warehouses: $('userWarehouses').value.split(/[،,]/).map((x) => x.trim()).filter(Boolean),
         password: $('userPassword').value,
       });
@@ -1867,10 +1958,24 @@
   });
   $('userForm').addEventListener('submit', saveUser);
   $('userClear').addEventListener('click', clearUserForm);
+  $('userPreset').addEventListener('change', () => {
+    const name = $('userPreset').value;
+    if (name) applyUserPreset(name);
+  });
+  for (const id of ['permAdd', 'permApprove', 'permDeliver', 'permAdmin']) {
+    $(id).addEventListener('change', () => {
+      if (id === 'permAdmin') {
+        if ($(id).checked) setCheckedPerms(PERM_LIST);
+        else syncAdminLock();
+      }
+      syncPreset();
+    });
+  }
   $('userRows').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-user]');
     if (b) editUser(b.dataset.user);
   });
+  clearUserForm();
   $('passwordForm').addEventListener('submit', changePassword);
   $('rulesForm').addEventListener('submit', saveRules);
   $('snapshotForm').addEventListener('submit', refreshSnapshot);

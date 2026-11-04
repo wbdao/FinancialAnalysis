@@ -939,6 +939,15 @@ select {
   accent-color: var(--primary);
 }
 
+/* A user can hold more than one permission, so the form shows checkboxes. */
+.perm-field { display: grid; gap: 7px; }
+.perm-title { font-size: 12px; font-weight: 700; color: var(--muted); }
+.perm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.perm-grid .check { margin: 0; }
+.perm-grid .check input:disabled { cursor: not-allowed; opacity: .6; }
+.perm-hint { margin: 0; font-size: 11.5px; line-height: 1.6; }
+.perm-list { display: flex; flex-wrap: wrap; gap: 4px; }
+
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
 .card-head .actions { align-items: flex-end; }
 
