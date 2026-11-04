@@ -7,13 +7,14 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=19">
+  <link rel="stylesheet" href="styles.css?v=20">
 </head>
 <body data-view="login">
 
   <!-- Icon sprite -->
   <svg class="sprite" aria-hidden="true" focusable="false">
     <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+    <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></symbol>
     <symbol id="i-invoices" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></symbol>
     <symbol id="i-checks" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4M15 15h2"/><path d="M7 3h10"/></symbol>
@@ -48,7 +49,10 @@
 
       <nav id="tabs" class="nav tabs" aria-label="الشاشات" hidden>
         <p class="nav-label">الرئيسية</p>
-        <button type="button" data-view="invoices" aria-current="page">
+        <button type="button" data-view="dashboard" aria-current="page">
+          <svg class="icon"><use href="#i-dashboard"></use></svg><span>لوحة القيادة</span>
+        </button>
+        <button type="button" data-view="invoices">
           <svg class="icon"><use href="#i-invoices"></use></svg><span>الفواتير</span>
         </button>
         <button type="button" data-view="check" data-perm="تسجيل الطلبات">
@@ -146,6 +150,10 @@
               </form>
             </div>
           </div>
+        </section>
+
+        <section id="view-dashboard" hidden>
+          <div id="dashboardBody"></div>
         </section>
 
         <section id="view-invoices" hidden>
@@ -647,8 +655,8 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=19"></script>
-  <script src="demo.js?v=19"></script>
-  <script src="app.js?v=19"></script>
+  <script src="engine.js?v=20"></script>
+  <script src="demo.js?v=20"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>

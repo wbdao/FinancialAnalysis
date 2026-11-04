@@ -63,7 +63,8 @@
   const CACHE_TTL = 24 * 60 * 60 * 1000;
   const VIEW_META = {
     login: ['تسجيل الدخول', 'الوصول إلى لوحة التحكم'],
-    invoices: ['لوحة التحكم', 'نظرة شاملة على الائتمان والضمان والمتأخرات'],
+    dashboard: ['لوحة القيادة', 'ما يحتاج انتباهك اليوم وأين تتركز المخاطر'],
+    invoices: ['الفواتير', 'كل الفواتير وتفاصيل الائتمان والضمان والمتأخرات'],
     check: ['فحص فاتورة جديدة', 'قرار سريع قبل إصدار الفاتورة'],
     checks: ['مركز الشيكات', 'الشيكات المفتوحة والمستحقة والمرتجعة'],
     customer: ['ملف العميل', 'الصورة الكاملة للعميل قبل القرار'],
@@ -87,6 +88,7 @@
     decisionPending: false, decisionPreview: false, decisionCanAct: false, cacheSavedAt: null,
     build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
     checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
+    requestsLoading: false, requestsError: '',
     plans: [], plansLoaded: false, editing: null,
   };
 
@@ -254,7 +256,7 @@
     state.rules = Object.assign({}, Engine.DEFAULT_RULES, snap.rules || {});
     state.cacheSavedAt = snap.savedAt || 0;
     recompute();
-    show('invoices');
+    show('dashboard');
   }
 
   /* ---- session --------------------------------------------------------------- */
@@ -425,9 +427,10 @@
       deciding: null, decisionPending: false, decisionPreview: false, decisionCanAct: false,
       isDemo: false, cacheSavedAt: null, build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
       checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
+      requestsLoading: false, requestsError: '',
       plans: [], plansLoaded: false, editing: null,
     });
-    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount', 'checkKpis', 'checkRows', 'checksCount', 'customerBody']) $(id).innerHTML = '';
+    for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'dashboardBody', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount', 'checkKpis', 'checkRows', 'checksCount', 'customerBody']) $(id).innerHTML = '';
     $('requestsMore').hidden = true;
     $('checksMore').hidden = true;
     showBuild();
@@ -466,7 +469,7 @@
       saveToken(data.token);
       $('loginPass').value = '';
       signedIn();
-      show('invoices');
+      show('dashboard');
       await loadData();
     } catch (e) {
       $('loginError').textContent = e.message;
@@ -522,6 +525,7 @@
     fillRulesForm();
     state.shown = PAGE_SIZE;
     renderInvoices();
+    if (document.body.dataset.view === 'dashboard') renderDashboard();
     if (document.body.dataset.view === 'checks') renderChecks();
     if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
     $('checkResult').innerHTML = '';
@@ -540,7 +544,8 @@
       state.cacheSavedAt = null;
       console.info('data read', data.stats);
       recompute();
-      show('invoices');
+      show('dashboard');
+      if (!state.isDemo) loadRequests();
       await saveCache();
     } catch (e) {
       console.error(e);
@@ -554,7 +559,7 @@
   // snapshot if it is still usable. The sheets are read only when needed.
   async function boot() {
     signedIn();
-    show('invoices');
+    show('dashboard');
     banner('جارٍ التحقق من الجلسة وعرض البيانات…');
     const cached = await readCache();
     let ping;
@@ -597,13 +602,13 @@
     signedIn();
     applyPermissions();
     recompute();
-    show('invoices');
+    show('dashboard');
   }
 
   /* ---- navigation ------------------------------------------------------------- */
 
   function show(view) {
-    for (const name of ['login', 'invoices', 'check', 'checks', 'customer', 'requests', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
+    for (const name of ['login', 'dashboard', 'invoices', 'check', 'checks', 'customer', 'requests', 'users', 'audit', 'settings']) $(`view-${name}`).hidden = name !== view;
     document.querySelectorAll('.tabs button').forEach((b) => {
       if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
@@ -615,6 +620,7 @@
       $('pageSubtitle').textContent = meta[1];
       document.title = `${meta[0]} · موقف الفواتير`;
     }
+    if (view === 'dashboard') { renderDashboard(); ensureRequests(); }
     if (view === 'checks' && state.result) renderChecks();
     if (view === 'customer' && state.result) renderCustomer();
     document.body.classList.remove('nav-open');
@@ -678,9 +684,11 @@
     </article>`;
   }
 
-  function renderAgingChart(s) {
+  function renderAgingChart(s, target = 'aging') {
+    const el = $(target);
+    if (!el) return;
     const max = Math.max(1, ...s.aging);
-    $('aging').innerHTML = Engine.AGING_BUCKETS.map((label, i) => {
+    el.innerHTML = Engine.AGING_BUCKETS.map((label, i) => {
       const height = Math.max(5, Math.round((s.aging[i] / max) * 100));
       return `<button type="button" class="bar-col" data-bucket="${i}" aria-pressed="${state.bucket === i}" title="${esc(label)}: ${money(s.aging[i])}">
         <span class="bar-value">${money(s.aging[i])}</span>
@@ -690,7 +698,9 @@
     }).join('');
   }
 
-  function renderStatusChart(s) {
+  function renderStatusChart(s, target = 'statusChart') {
+    const el = $(target);
+    if (!el) return;
     const order = [
       ['stop', 'حرجة', 'var(--c-stop)'],
       ['warn', 'تحتاج متابعة', 'var(--c-warn)'],
@@ -712,7 +722,7 @@
       : 'conic-gradient(var(--line), var(--line))';
     const legend = order.map(([key, label, color]) => `
       <li><span class="dot" style="--dc:${color}"></span>${esc(label)}<b>${money(s.byVerdict[key].count)}</b></li>`).join('');
-    $('statusChart').innerHTML = `
+    el.innerHTML = `
       <div class="donut" style="background:${gradient}">
         <div class="donut-hole">
           <span>${money(total)} فاتورة</span>
@@ -787,6 +797,213 @@
         <td><span class="tag ${i.verdict}">${VERDICT[i.verdict]}</span></td>
       </tr>`).join('');
     $('more').hidden = list.length <= state.shown;
+  }
+
+  /* ---- command dashboard ---------------------------------------------------- */
+
+  function ensureRequests() {
+    if (state.isDemo || !state.token || state.requestsLoaded || state.requestsLoading) return;
+    loadRequests();
+  }
+
+  function dashboardRisk(c) {
+    if (c.stopped) return { tag: 'stop', label: 'موقوف' };
+    if (c.overLimit > 0) return { tag: 'warn', label: 'متجاوز الحد' };
+    if (c.overdue > 0) return { tag: 'warn', label: 'متأخر' };
+    return { tag: 'ok', label: 'منتظم' };
+  }
+
+  function dashboardRequestItem(r) {
+    return `<li class="dash-item">
+      <button type="button" class="link-btn dash-item-main" data-review="${esc(r.id)}">
+        <span class="dash-item-title">${esc(r.customer)} <small>${esc(r.id)}</small></span>
+        <span class="dash-item-sub">${money(r.amount)} · ${esc(r.requester || '')} · ${esc(r.createdAt || '')}</span>
+      </button>
+      <span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span>
+    </li>`;
+  }
+
+  function renderDashboard() {
+    if (!state.result) return;
+    const s = state.result.summary;
+    const requests = state.requests || [];
+    const pending = requests.filter((r) => r.status === 'قيد الاعتماد');
+    const known = state.requestsLoaded;
+    const mine = state.user ? pending.filter(requestCanAct) : [];
+    const mineAmount = mine.reduce((n, r) => n + (Number(r.amount) || 0), 0);
+    const live = requests.filter(deliveryApplies);
+    const late = live.filter((r) => deliveryLate(r) > 0);
+    const oldestLate = late.reduce((m, r) => Math.max(m, deliveryLate(r)), 0);
+    const checks = state.checkList || [];
+    const rejected = checks.filter((k) => k.open && k.rejected);
+    const due = checks.filter((k) => k.open && !k.rejected && k.due != null && k.due <= state.result.analysisDay);
+    const watch = [...rejected, ...due].slice(0, 5);
+    const checkAmount = (list) => list.reduce((n, k) => n + (Number(k.net) || 0), 0);
+    const overdueCount = state.result.invoices.filter((i) => i.isOpen && i.overdueDays > 0).length;
+    const top = state.result.customers
+      .filter((c) => c.exposure > 0 || c.overdue > 0 || c.overLimit > 0)
+      .sort((a, b) => b.overdue - a.overdue || b.exposure - a.exposure)
+      .slice(0, 5);
+    const recent = requests.slice().reverse().slice(0, 5);
+    const dataAt = Number(state.sheets.dataAt);
+    const age = Number.isFinite(dataAt) && dataAt > 0 ? Math.max(0, Math.round((Date.now() - dataAt) / 60000)) : null;
+    const stale = age != null && age > 30;
+    const pct = (v) => (s.openAmount ? `${Math.round((v / s.openAmount) * 100)}% من المفتوح` : '—');
+    const emptyRequests = !known
+      ? (state.isDemo ? 'وضع البيانات النموذجية لا يقرأ الطلبات.' : state.requestsError ? esc(state.requestsError) : 'جارٍ تحميل الطلبات…')
+      : '';
+    const stage = (status) => live.filter((r) => r.deliveryStatus === status).length;
+    const stageCard = (status, label, tone) => `<div class="dash-stage ${tone || ''}">
+      <span>${esc(label)}</span><strong>${money(stage(status))}</strong>
+    </div>`;
+
+    $('dashboardBody').innerHTML = `
+      <section class="dash-hero">
+        <div class="dash-hero-copy">
+          <span class="dash-eyebrow"><svg class="icon"><use href="#i-dashboard"></use></svg> لوحة القيادة</span>
+          <h2>مرحبًا، ${esc(state.user ? state.user.name : 'وضع التجربة')}</h2>
+          <p>صورة المحفظة حتى ${dateOf(state.result.analysisDay)}${age != null ? ` · البيانات مجهزة ${timeOf(dataAt)}` : ''}${stale ? ' · قد تكون البيانات قديمة' : ''}.</p>
+          <div class="dash-actions">
+            ${canAdd() ? `<button type="button" data-dash-action="check"><svg class="icon"><use href="#i-check"></use></svg> فحص فاتورة</button>` : ''}
+            <button type="button" class="ghost" data-dash-action="requests">مراجعة الطلبات${mine.length ? ` (${mine.length})` : ''}</button>
+            <button type="button" class="ghost" data-dash-action="checks">مركز الشيكات</button>
+          </div>
+        </div>
+        <div class="dash-hero-stats">
+          <div class="dash-hero-stat ${mine.length ? 'warn' : ''}">
+            <span>بانتظار قرارك</span><strong>${known ? money(mine.length) : '—'}</strong><small>${known ? money(mineAmount) : 'جارٍ تحميل الطلبات'}</small>
+          </div>
+          <div class="dash-hero-stat ${late.length ? 'stop' : ''}">
+            <span>تسليم متأخر</span><strong>${money(late.length)}</strong><small>${oldestLate ? `أقدمها ${money(oldestLate)} يوم` : 'لا يوجد تأخير'}</small>
+          </div>
+          <div class="dash-hero-stat ${rejected.length ? 'stop' : ''}">
+            <span>شيكات مرفوضة</span><strong>${s.hasChecks ? money(rejected.length) : '—'}</strong><small>${s.hasChecks ? money(checkAmount(rejected)) : 'شيت الشيكات غير متاح'}</small>
+          </div>
+        </div>
+      </section>
+
+      <div class="kpis">
+        ${kpiCard('wallet', 'primary', 'الفواتير المفتوحة', money(s.openAmount), `${money(s.open)} فاتورة من ${money(s.invoices)}`)}
+        ${kpiCard('clock', 'warn', 'المتأخرات', money(s.overdueAmount), `${money(overdueCount)} فاتورة متأخرة`)}
+        ${kpiCard('shield', 'warn', 'غير مغطى بالضمان', money(s.uncoveredAmount), pct(s.uncoveredAmount))}
+        ${kpiCard('alert', 'stop', 'تجاوز حد الائتمان', money(s.overLimitAmount), `${money(s.overLimitCustomers)} عميل`)}
+        ${kpiCard('requests', mine.length ? 'warn' : 'primary', 'بانتظار قرارك', known ? money(mine.length) : '—', known ? money(mineAmount) : 'جارٍ تحميل الطلبات')}
+        ${kpiCard('check-circle', 'info', 'شيكات تحتاج متابعة', s.hasChecks ? money(rejected.length + due.length) : '—', s.hasChecks ? `مرفوضة ${money(rejected.length)} · مستحقة ${money(due.length)}` : 'شيت الشيكات غير متاح')}
+      </div>
+
+      <div class="dash-grid">
+        <section class="card dash-card dash-span-7" aria-labelledby="dashApprovalsTitle">
+          <div class="card-head">
+            <div><h2 id="dashApprovalsTitle">طلبات تنتظرك</h2><p>الأقرب إلى القرار، دون الطلبات التي سجلتها بنفسك.</p></div>
+            <button type="button" class="link-btn" data-dash-action="requests">عرض الكل</button>
+          </div>
+          ${!canDecide()
+            ? '<div class="dash-empty">عرض فقط: لا تملك صلاحية اعتماد الطلبات.</div>'
+            : !known
+              ? `<div class="dash-empty">${emptyRequests}</div>`
+              : !mine.length
+                ? '<div class="dash-empty">لا توجد طلبات تنتظر قرارك الآن.</div>'
+                : `<ul class="dash-list">${mine.slice(0, 4).map(dashboardRequestItem).join('')}</ul>`}
+        </section>
+
+        <section class="card dash-card dash-span-5" aria-labelledby="dashDeliveryTitle">
+          <div class="card-head">
+            <div><h2 id="dashDeliveryTitle">خط التسليم</h2><p>الطلبات المعتمدة وأين وصلت.</p></div>
+            <button type="button" class="link-btn" data-dash-action="requests">عرض الكل</button>
+          </div>
+          <div class="dash-pipeline">
+            ${stageCard(DELIVERY.warehouse, 'في المخزن')}
+            ${stageCard(DELIVERY.transit, 'جاري التسليم')}
+            ${stageCard(DELIVERY.delivered, 'تم التسليم', 'ok')}
+            ${stageCard(DELIVERY.failed, 'متعذر', 'stop')}
+          </div>
+          ${late.length
+            ? `<ul class="dash-list">${late.slice(0, 3).map((r) => `
+                <li class="dash-item">
+                  <button type="button" class="link-btn dash-item-main" data-review="${esc(r.id)}">
+                    <span class="dash-item-title">${esc(r.customer)} <small>${esc(r.id)}</small></span>
+                    <span class="dash-item-sub">${esc(r.deliveryStatus)} · متأخر ${money(deliveryLate(r))} يوم · ${esc(r.deliveryDue || '')}</span>
+                  </button>
+                  <span class="tag stop">متأخر</span>
+                </li>`).join('')}</ul>`
+            : '<p class="dash-empty">لا يوجد تسليم متأخر.</p>'}
+        </section>
+
+        <section class="card chart-card dash-span-7" aria-labelledby="dashAgingTitle">
+          <div class="card-head"><div><h2 id="dashAgingTitle">أعمار المديونية</h2><p>اضغط على أي شريحة للانتقال إلى الفواتير</p></div></div>
+          <div id="dashAging" class="aging" role="group" aria-label="أعمار الفواتير المفتوحة"></div>
+        </section>
+
+        <section class="card chart-card dash-span-5" aria-labelledby="dashStatusTitle">
+          <div class="card-head"><div><h2 id="dashStatusTitle">توزيع الفواتير</h2><p>حسب الموقف النهائي</p></div></div>
+          <div id="dashStatus" class="status-chart"></div>
+        </section>
+
+        <section class="card dash-card dash-span-7" aria-labelledby="dashTopTitle">
+          <div class="card-head">
+            <div><h2 id="dashTopTitle">أهم العملاء تعرضًا</h2><p>مرتبون بالمتأخرات ثم الرصيد شامل الشيكات.</p></div>
+            <button type="button" class="link-btn" data-dash-action="invoices">كل الفواتير</button>
+          </div>
+          ${top.length ? `<div class="table-wrap dash-table"><table>
+            <thead><tr><th>العميل</th><th class="n">التعرض</th><th class="n">المتأخرات</th><th class="n">تجاوز الحد</th><th>الحالة</th></tr></thead>
+            <tbody>${top.map((c) => {
+              const risk = dashboardRisk(c);
+              return `<tr>
+                <td><button type="button" class="link-btn" data-account="${esc(c.account)}">${esc(c.name)}</button><span class="sub">${esc(c.account)} · ${esc(c.warehouse || 'بلا مخزن')}</span></td>
+                <td class="n">${money(c.exposure)}</td>
+                <td class="n">${c.overdue > 0 ? `<span class="late">${money(c.overdue)}</span>` : money(c.overdue)}</td>
+                <td class="n">${c.overLimit > 0 ? `<span class="note warn">${money(c.overLimit)}</span>` : '—'}</td>
+                <td><span class="tag ${risk.tag}">${esc(risk.label)}</span></td>
+              </tr>`;
+            }).join('')}</tbody>
+          </table></div>` : '<div class="dash-empty">لا توجد أرصدة أو متأخرات لعرضها.</div>'}
+        </section>
+
+        <section class="card dash-card dash-span-5" aria-labelledby="dashChecksTitle">
+          <div class="card-head">
+            <div><h2 id="dashChecksTitle">شيكات تحتاج متابعة</h2><p>المرفوضة والمستحقة أولًا.</p></div>
+            <button type="button" class="link-btn" data-dash-action="checks">عرض الكل</button>
+          </div>
+          ${!s.hasChecks
+            ? '<div class="dash-empty">شيت الشيكات غير متاح، فلا يمكن عرض الشيكات.</div>'
+            : !watch.length
+              ? '<div class="dash-empty">لا توجد شيكات مرفوضة أو مستحقة.</div>'
+              : `<ul class="dash-list">${watch.map((k) => {
+                  const st = checkStatus(k);
+                  return `<li class="dash-item">
+                    <button type="button" class="link-btn dash-item-main" data-account="${esc(k.account)}">
+                      <span class="dash-item-title">${esc(k.customer)} <small>${esc(k.checkNo)}</small></span>
+                      <span class="dash-item-sub">${money(k.net)} · ${esc(checkTiming(k))}</span>
+                    </button>
+                    <span class="tag ${st.tag}">${esc(st.label)}</span>
+                  </li>`;
+                }).join('')}</ul>`}
+        </section>
+
+        <section class="card dash-card dash-span-12" aria-labelledby="dashRecentTitle">
+          <div class="card-head">
+            <div><h2 id="dashRecentTitle">آخر الطلبات</h2><p>أحدث ما سُجل، بغض النظر عن حالته.</p></div>
+            <button type="button" class="link-btn" data-dash-action="requests">كل الطلبات</button>
+          </div>
+          ${!known
+            ? `<div class="dash-empty">${emptyRequests}</div>`
+            : !recent.length
+              ? '<div class="dash-empty">لا توجد طلبات مسجلة بعد.</div>'
+              : `<div class="table-wrap dash-table"><table>
+                  <thead><tr><th>الطلب</th><th>العميل</th><th class="n">القيمة</th><th>الفحص</th><th>الحالة</th><th>التسليم</th></tr></thead>
+                  <tbody>${recent.map((r) => `<tr tabindex="0" data-review="${esc(r.id)}">
+                    <td>${esc(r.id)}<span class="sub">${esc(r.createdAt || '')}</span></td>
+                    <td><button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button></td>
+                    <td class="n">${money(r.amount)}</td>
+                    <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span></td>
+                    <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span></td>
+                    <td>${deliveryApplies(r) ? `<span class="tag ${DELIVERY_TAG[r.deliveryStatus] || 'paid'}">${esc(r.deliveryStatus || 'لم يبدأ')}</span>` : '<span class="sub">—</span>'}</td>
+                  </tr>`).join('')}</tbody>
+                </table></div>`}
+        </section>
+      </div>`;
+    renderAgingChart(s, 'dashAging');
+    renderStatusChart(s, 'dashStatus');
   }
 
   /* ---- invoice detail --------------------------------------------------------- */
@@ -1109,7 +1326,7 @@
     const dueChecks = openChecks.filter((k) => !k.rejected && k.due != null && k.due <= state.result.analysisDay);
     const sum = (list) => list.reduce((n, k) => n + (Number(k.net) || 0), 0);
     const invoices = c.invoices.slice().sort((a, b) => (b.isOpen - a.isOpen) || b.day - a.day);
-    const from = { checks: 'مركز الشيكات', requests: 'الطلبات', check: 'فحص فاتورة جديدة', invoices: 'الفواتير' }[state.customerFrom] || 'الفواتير';
+    const from = { dashboard: 'لوحة القيادة', checks: 'مركز الشيكات', requests: 'الطلبات', check: 'فحص فاتورة جديدة', invoices: 'الفواتير' }[state.customerFrom] || 'الفواتير';
     const stateTag = c.stopped ? '<span class="tag stop">حساب موقوف</span>'
       : c.overLimit > 0 ? '<span class="tag warn">تجاوز الحد</span>'
       : c.overdue > 0 ? '<span class="tag warn">عليه متأخرات</span>'
@@ -1228,6 +1445,9 @@
   }
 
   async function loadRequests() {
+    if (state.requestsLoading) return;
+    state.requestsLoading = true;
+    state.requestsError = '';
     $('requestsReload').disabled = true;
     $('requestsCount').textContent = 'جارٍ قراءة الطلبات…';
     try {
@@ -1240,12 +1460,15 @@
     } catch (e) {
       state.requests = [];
       state.requestsLoaded = false;
+      state.requestsError = e.message;
       $('requestRows').innerHTML = '';
       $('requestsMore').hidden = true;
       $('requestsCount').textContent = e.message;
       if (state.customerAccount && document.body.dataset.view === 'customer') renderCustomer();
     } finally {
+      state.requestsLoading = false;
       $('requestsReload').disabled = false;
+      if (document.body.dataset.view === 'dashboard') renderDashboard();
     }
   }
 
@@ -2243,6 +2466,33 @@
   $('checkResult').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-account]');
     if (b) openCustomer(b.dataset.account, 'check');
+  });
+
+  $('dashboardBody').addEventListener('click', (e) => {
+    const bucket = e.target.closest('button[data-bucket]');
+    if (bucket) {
+      const b = +bucket.dataset.bucket;
+      state.bucket = state.bucket === b ? null : b;
+      show('invoices');
+      renderInvoices();
+      return;
+    }
+    const account = e.target.closest('button[data-account]');
+    if (account) { openCustomer(account.dataset.account, 'dashboard'); return; }
+    const review = e.target.closest('[data-review]');
+    if (review) { openRequest(review.dataset.review); return; }
+    const action = e.target.closest('[data-dash-action]');
+    if (!action) return;
+    const view = action.dataset.dashAction;
+    if (view === 'requests') { show('requests'); ensureRequests(); return; }
+    if (view === 'loadRequests') { loadRequests(); return; }
+    if (view === 'invoices') { show('invoices'); renderInvoices(); return; }
+    show(view);
+  });
+  $('dashboardBody').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const row = e.target.closest('tr[data-review]');
+    if (row && e.target === row) openRequest(row.dataset.review);
   });
 
   initTheme();
