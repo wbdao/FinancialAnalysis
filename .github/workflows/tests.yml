@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Engine tests
+        run: node test/engine.test.js
+      - name: Script tests
+        run: node test/script.test.js
+      - name: Syntax check
+        run: |
+          node --check app.js
+          node --check engine.js
+          node --check demo.js
+          node --check tools/serve.js

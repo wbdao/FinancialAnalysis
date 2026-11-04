@@ -213,6 +213,32 @@ test('add: a clean check needs no approval, ids increase, a retry is not a secon
   assert.strictEqual(s.call(s.admin, 'list').requests.length, 2);
 });
 
+test('add: a retry with another user\'s ref is not a duplicate', () => {
+  const s = setup();
+  const sara = s.addUser('sara', 'موظف', ['65']);
+  const omar = s.addUser('omar', 'موظف', ['70']);
+  const first = s.call(sara, 'add', { account: 'A1', amount: 100, ref: 'R-SHARED' });
+  assert.ok(first.ok, first.error);
+  const second = s.call(omar, 'add', { account: 'B1', amount: 100, ref: 'R-SHARED' });
+  assert.ok(second.ok, second.error);
+  assert.strictEqual(second.duplicate, undefined);
+  assert.notStrictEqual(second.request.id, first.request.id);
+  // The same requester still gets the original request back.
+  const retry = s.call(sara, 'add', { account: 'A1', amount: 100, ref: 'R-SHARED' });
+  assert.strictEqual(retry.duplicate, true);
+  assert.strictEqual(retry.request.id, first.request.id);
+});
+
+test('recheck: carries the snapshot time for the decision', () => {
+  const s = setup();
+  const sara = s.addUser('sara', 'موظف', ['65']);
+  const amr = s.addUser('amr', 'معتمد', ['65']);
+  const id = s.call(sara, 'add', { account: 'A1', amount: 100, ref: 'R-TIME' }).request.id;
+  const r = s.call(amr, 'recheck', { id });
+  assert.ok(r.ok, r.error);
+  assert.ok(r.check.dataAt > 0);
+});
+
 test('add: outside the warehouse scope or an unknown customer is refused', () => {
   const s = setup();
   const t = s.addUser('sara', 'موظف', ['65']);
@@ -269,6 +295,22 @@ test('decide: role, own requests, scope, single decision and a current check', (
   assert.strictEqual(decide(s.admin, adminOwn, 'approve').request.status, 'معتمد');
 });
 
+test('decide: a decision is not written when the audit log cannot be written', () => {
+  const s = setup();
+  const id = s.call(s.admin, 'add', { account: 'A1', amount: 100, ref: 'R-AUDIT' }).request.id;
+  const log = s.book.getSheetByName(LOG);
+  assert.ok(log, 'the log sheet exists');
+  const append = log.appendRow;
+  log.appendRow = () => { throw new Error('audit down'); };
+  const blocked = s.call(s.admin, 'decide', { id, decision: 'approve' });
+  assert.strictEqual(blocked.ok, false);
+  assert.match(blocked.error, /سجل العمليات/);
+  log.appendRow = append;
+  const saved = s.call(s.admin, 'list').requests.find((x) => x.id === id);
+  assert.strictEqual(saved.status, 'قيد الاعتماد');
+  assert.ok(s.call(s.admin, 'decide', { id, decision: 'approve' }).ok);
+});
+
 test('deliver: only a delivery role, only approved, with dates and a reason', () => {
   const s = setup();
   const clerk = s.addUser('sara', 'موظف');
@@ -304,6 +346,21 @@ test('deliver: only a delivery role, only approved, with dates and a reason', ()
   assert.strictEqual(cleared.request.deliveryStatus, '');
   assert.strictEqual(cleared.request.deliveryDue, '');
   assert.strictEqual(cleared.request.deliveryAt, '');
+});
+
+test('deliver: a delivery update is not written when the audit log cannot be written', () => {
+  const s = setup();
+  const id = s.call(s.admin, 'add', { account: 'B1', amount: 100, ref: 'R-DAUDIT' }).request.id;
+  const log = s.book.getSheetByName(LOG);
+  const append = log.appendRow;
+  log.appendRow = () => { throw new Error('audit down'); };
+  const blocked = s.call(s.admin, 'deliver', { id, status: 'جاري التسليم' });
+  assert.strictEqual(blocked.ok, false);
+  assert.match(blocked.error, /سجل العمليات/);
+  log.appendRow = append;
+  const saved = s.call(s.admin, 'list').requests.find((x) => x.id === id);
+  assert.strictEqual(saved.deliveryStatus, 'في أرضية المخزن');
+  assert.ok(s.call(s.admin, 'deliver', { id, status: 'جاري التسليم' }).ok);
 });
 
 test('delivery starts in the warehouse for a clean request and after approval', () => {

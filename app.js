@@ -42,6 +42,12 @@
     failed: 'متعذر التسليم',
   };
   const DELIVERY_REASONS = ['عدم توافر عربيات النقل', 'العميل غير جاهز', 'نقص أصناف', 'مشكلة مستندات', 'أخرى'];
+  // The demo has no plan sheet, so these stand in for «طرق السداد».
+  const DEMO_PLANS = [
+    { name: 'Net30', weeks: 4, count: 1, days: 30, startPercent: 0, advance: 0, advancePercent: 0, weekly: 0, weeklyPercent: 0 },
+    { name: 'Sch_4W', weeks: 4, count: 4, days: 7, startPercent: 0, advance: 0, advancePercent: 0, weekly: 0, weeklyPercent: 0 },
+    { name: '25%Sch_8W', weeks: 8, count: 8, days: 7, startPercent: 25, advance: 0, advancePercent: 0, weekly: 0, weeklyPercent: 0 },
+  ];
   const DELIVERY_TAG = {
     [DELIVERY.warehouse]: 'warn',
     [DELIVERY.transit]: 'paid',
@@ -69,6 +75,9 @@
 
   const $ = (id) => document.getElementById(id);
   const money = (v) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(v);
+  // Actual invoice values keep their cents; whole amounts still print without .00.
+  const money2 = (v) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v);
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const dateOf = (day) => (day == null ? '—' : new Date(day * 86400000).toISOString().slice(0, 10));
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
@@ -78,6 +87,7 @@
     decisionPending: false, decisionPreview: false, decisionCanAct: false, cacheSavedAt: null,
     build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
     checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
+    plans: [], plansLoaded: false, editing: null,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -186,6 +196,11 @@
       if (!tag) return null;
       const snap = await cacheRequest('readonly', (store) => store.get(CACHE_KEY));
       if (!snap || snap.version !== CACHE_VERSION || snap.tokenTag !== tag || !snap.user || !snap.base || !snap.tx) return null;
+      // The local copy is a convenience, not a record: never show it after its day.
+      if (!(Number(snap.savedAt) > 0) || Date.now() - Number(snap.savedAt) >= CACHE_TTL) {
+        await cacheRequest('readwrite', (store) => store.delete(CACHE_KEY));
+        return null;
+      }
       return snap;
     } catch (e) {
       console.warn('local cache read failed', e);
@@ -318,13 +333,13 @@
   function actualDiffText(diff) {
     if (diff == null) return '';
     if (Math.abs(diff) < 0.005) return 'مطابق للمتفق عليه';
-    return diff > 0 ? `أعلى بـ ${money(diff)}` : `أقل بـ ${money(-diff)}`;
+    return diff > 0 ? `أعلى بـ ${money2(diff)}` : `أقل بـ ${money2(-diff)}`;
   }
 
   function actualCell(r) {
     if (!hasActual(r)) return '<span class="sub">لم تُسجل</span>';
     const diff = actualDiff(r);
-    return `<span class="actual">الفعلي ${money(r.actualAmount)}</span>`
+    return `<span class="actual">الفعلي ${money2(r.actualAmount)}</span>`
       + `<span class="sub ${diff > 0 ? 'diff-up' : diff < 0 ? 'diff-down' : ''}">${actualDiffText(diff)}</span>`;
   }
 
@@ -336,12 +351,81 @@
     applyPermissions();
   }
 
+  /* ---- payment plans (optional «طرق السداد» sheet) ------------------------- */
+
+  function fillPlanList() {
+    $('planList').innerHTML = state.plans
+      .map((p) => `<option value="${esc(p.name)}"></option>`).join('');
+  }
+
+  async function loadPlans() {
+    if (state.plansLoaded) return;
+    state.plansLoaded = true;
+    if (state.isDemo) {
+      state.plans = DEMO_PLANS;
+      fillPlanList();
+      return;
+    }
+    try {
+      const data = await callScript('plans');
+      state.plans = Array.isArray(data.plans) ? data.plans : [];
+    } catch (e) {
+      // An older server has no plans action; the fields stay manual.
+      state.plans = [];
+    }
+    fillPlanList();
+  }
+
+  function planByName(name) {
+    const key = String(name || '').trim().toLowerCase();
+    return key ? state.plans.find((p) => String(p.name).trim().toLowerCase() === key) || null : null;
+  }
+
+  function planHint(plan) {
+    if (!plan) return '';
+    const parts = [];
+    if (plan.startPercent) parts.push(`مقدمة ${plan.startPercent}%`);
+    if (plan.count > 0) parts.push(`${plan.count} دفعة`);
+    if (plan.days > 0) parts.push(`كل ${plan.days} يوم`);
+    return parts.join(' · ');
+  }
+
+  // The plan is a reference, not a rule: it fills the two fields and the user
+  // can still change them before sending.
+  function planAmounts(plan, amount) {
+    if (!plan) return { advance: '', weekly: '' };
+    const value = Number(amount) || 0;
+    let advance = Number(plan.advance) || 0;
+    if (!advance && plan.advancePercent) advance = value * plan.advancePercent / 100;
+    if (!advance && plan.startPercent) advance = value * plan.startPercent / 100;
+    advance = Math.min(advance, value);
+    let weekly = Number(plan.weekly) || 0;
+    if (!weekly && plan.weeklyPercent) weekly = value * plan.weeklyPercent / 100;
+    if (!weekly) {
+      const count = Number(plan.count) || 0;
+      if (count > 1) weekly = (value - advance) / count;
+      else if (count === 1 && Number(plan.days) > 0 && Number(plan.days) <= 7) weekly = value - advance;
+    }
+    return {
+      advance: advance > 0 ? String(round2(advance)) : '',
+      weekly: weekly > 0 ? String(round2(weekly)) : '',
+    };
+  }
+
+  function applyPlan(plan, amount, advanceId, weeklyId, hintId) {
+    const amounts = planAmounts(plan, amount);
+    $(advanceId).value = amounts.advance;
+    $(weeklyId).value = amounts.weekly;
+    $(hintId).textContent = planHint(plan);
+  }
+
   function clearData() {
     Object.assign(state, {
       user: null, sheets: null, result: null, requests: [], users: [], lastCheck: null, bucket: null,
       deciding: null, decisionPending: false, decisionPreview: false, decisionCanAct: false,
       isDemo: false, cacheSavedAt: null, build: '', requestShown: REQUEST_PAGE, audit: [], auditTotal: 0,
       checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
+      plans: [], plansLoaded: false, editing: null,
     });
     for (const id of ['rows', 'kpis', 'aging', 'statusChart', 'requestRows', 'userRows', 'checkResult', 'customerList', 'auditRows', 'auditCount', 'checkKpis', 'checkRows', 'checksCount', 'customerBody']) $(id).innerHTML = '';
     $('requestsMore').hidden = true;
@@ -370,6 +454,7 @@
   function signedIn() {
     $('tabs').hidden = false;
     $('session').hidden = false;
+    loadPlans();
   }
 
   async function login(event) {
@@ -500,6 +585,9 @@
     const { base, tx, checks } = window.demoSheets();
     state.isDemo = true;
     state.cacheSavedAt = null;
+    state.plans = DEMO_PLANS;
+    state.plansLoaded = true;
+    fillPlanList();
     state.sheets = { base, tx, analysisDay: null, checks, checksError: '' };
     state.rules = Engine.DEFAULT_RULES;
     state.user = null;
@@ -828,6 +916,18 @@
         </div>
         <div class="panel request-form">
           <h3>تسجيل طلب الفاتورة</h3>
+          <div class="pay-grid">
+            <label>طريقة السداد / الخطة
+              <input id="requestPlan" list="planList" placeholder="اختر خطة أو اكتبها" autocomplete="off">
+            </label>
+            <label>الدفعة المقدمة
+              <input id="requestAdvance" type="number" min="0" step="0.01" inputmode="decimal" dir="ltr" placeholder="اختياري">
+            </label>
+            <label>الدفعة الأسبوعية
+              <input id="requestWeekly" type="number" min="0" step="0.01" inputmode="decimal" dir="ltr" placeholder="اختياري">
+            </label>
+          </div>
+          <p id="requestPlanHint" class="sub"></p>
           <label>ملاحظات الطلب
             <textarea id="requestNote" rows="2"></textarea>
           </label>
@@ -837,6 +937,10 @@
         <div class="panel"><h3>موقف العميل الحالي</h3>${customerFacts(c)}</div>
       </div>`;
     $('sendRequest').addEventListener('click', sendRequest);
+    $('requestPlan').addEventListener('change', () => {
+      applyPlan(planByName($('requestPlan').value), amount, 'requestAdvance', 'requestWeekly', 'requestPlanHint');
+    });
+    loadPlans();
   }
 
   /* ---- checks center ---------------------------------------------------------- */
@@ -1086,11 +1190,31 @@
       msg.textContent = 'لا يمكن تسجيل طلب من البيانات النموذجية.';
       return;
     }
+    const paymentMethod = $('requestPlan').value.trim();
+    const advance = $('requestAdvance').value.trim();
+    const weekly = $('requestWeekly').value.trim();
+    for (const [label, raw] of [['الدفعة المقدمة', advance], ['الدفعة الأسبوعية', weekly]]) {
+      if (raw === '') continue;
+      const n = Number(raw);
+      if (!isFinite(n) || n < 0) {
+        msg.className = 'form-error';
+        msg.textContent = `${label} يجب أن تكون رقمًا غير سالب.`;
+        return;
+      }
+      if (n > amount) {
+        msg.className = 'form-error';
+        msg.textContent = `${label} لا تزيد عن قيمة الفاتورة.`;
+        return;
+      }
+    }
     $('sendRequest').disabled = true;
     msg.className = '';
     msg.textContent = 'جارٍ الفحص في الخادم والتسجيل، وقد يستغرق ذلك بعض الوقت…';
     try {
-      const data = await callScript('add', { account: c.account, amount, note: $('requestNote').value, ref });
+      const data = await callScript('add', {
+        account: c.account, amount, note: $('requestNote').value, ref,
+        paymentMethod, advance, weekly,
+      });
       const previewLabel = { ok: 'سليمة', warn: 'تحتاج موافقة', stop: 'موقوفة' }[r.verdict];
       const changed = data.request.verdict !== previewLabel
         ? ` تغيّرت نتيجة الفحص إلى "${data.request.verdict}" لأن الخادم استخدم أحدث البيانات.` : '';
@@ -1185,7 +1309,7 @@
     const shown = list.slice(0, state.requestShown);
     $('requestsMore').hidden = shown.length >= list.length;
     if (!list.length) {
-      $('requestRows').innerHTML = '<tr><td colspan="8" class="empty">لا توجد طلبات مطابقة.</td></tr>';
+      $('requestRows').innerHTML = '<tr><td colspan="10" class="empty">لا توجد طلبات مطابقة.</td></tr>';
       return;
     }
     const own = (r) => state.user && String(r.requesterUser).toLowerCase() === state.user.username;
@@ -1197,6 +1321,8 @@
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
         <td><button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button><span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
         <td class="n">${money(r.amount)}${hasActual(r) ? `<span class="sub actual-line">${actualCell(r)}</span>` : ''}</td>
+        <td class="n">${r.advancePayment !== '' && r.advancePayment != null ? money(r.advancePayment) : '<span class="sub">—</span>'}</td>
+        <td class="n">${r.weeklyPayment !== '' && r.weeklyPayment != null ? money(r.weeklyPayment) : '<span class="sub">—</span>'}</td>
         <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span><span class="sub">${esc(r.reasons)}</span></td>
         <td>${esc(r.requester)}${r.note ? `<span class="sub">${esc(r.note)}</span>` : ''}</td>
         <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>
@@ -1207,18 +1333,25 @@
           ${r.deliveryDue ? `<span class="sub">الموعد: ${esc(r.deliveryDue)}</span>` : ''}
           ${r.deliveryAt ? `<span class="sub">سُلّم: ${esc(r.deliveryAt)}</span>` : ''}
           ${r.deliveryReason ? `<span class="sub">${esc(r.deliveryReason)}</span>` : ''}</td>
-        <td><button type="button" class="ghost" data-review="${esc(r.id)}">${act ? 'مراجعة' : editDelivery ? 'تسليم' : 'عرض'}</button></td>
+        <td class="row-actions">
+          <button type="button" class="ghost" data-review="${esc(r.id)}">${act ? 'مراجعة' : editDelivery ? 'تسليم' : 'عرض'}</button>
+          ${canEditRequest(r) ? `<button type="button" class="ghost" data-edit="${esc(r.id)}">تعديل</button>` : ''}
+        </td>
       </tr>`;
     }).join('');
   }
 
   function exportRequests() {
-    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة المتفق عليها', 'القيمة الفعلية', 'فرق القيمة', 'سبب اختلاف القيمة',
+    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة المتفق عليها', 'طريقة السداد', 'الدفعة المقدمة', 'الدفعة الأسبوعية',
+      'القيمة الفعلية', 'فرق القيمة', 'سبب اختلاف القيمة',
       'الفحص', 'الأسباب', 'الحالة', 'مقدم الطلب', 'تاريخ الطلب',
       'المعتمد', 'تاريخ الاعتماد', 'ملاحظات القرار', 'ملاحظة الطلب',
       'حالة التسليم', 'موعد التسليم', 'تاريخ التسليم', 'تأخير التسليم (يوم)', 'سبب التأخير', 'ملاحظات التسليم'];
     const rows = filteredRequests().map((r) => [
       r.id, r.customer, r.account, r.rep, Math.round(Number(r.amount) || 0),
+      r.paymentMethod || '',
+      r.advancePayment === '' || r.advancePayment == null ? '' : Number(r.advancePayment),
+      r.weeklyPayment === '' || r.weeklyPayment == null ? '' : Number(r.weeklyPayment),
       hasActual(r) ? Number(r.actualAmount) : '', hasActual(r) ? Math.round(actualDiff(r) * 100) / 100 : '', r.actualNote || '',
       r.verdict, r.reasons || '',
       r.status, r.requester, r.createdAt, r.approver || '', r.decidedAt || '', r.decisionNote || '', r.note || '',
@@ -1310,13 +1443,20 @@
       verdict: res.verdict, verdictLabel: VERDICT_LABEL[res.verdict] || res.verdict,
       exposureAfter: res.exposureAfter, creditLimit: c.creditLimit, guarantee: c.guarantee,
       overdue: c.overdue, checksRejected: c.checksRejected, reasons,
+      dataAt: state.sheets.dataAt || null,
     };
   }
 
   function checkHtml(check, label) {
+    const dataAt = Number(check.dataAt);
+    const ageMin = Number.isFinite(dataAt) && dataAt > 0
+      ? Math.max(0, Math.round((Date.now() - dataAt) / 60000))
+      : null;
+    const dataLine = ageMin == null ? ''
+      : `نسخة البيانات: ${esc(timeOf(dataAt))}${ageMin > 30 ? ' · قد تكون البيانات قديمة، راجعها قبل القرار' : ''} · `;
     return `
       <b>${label}:</b><span class="tag ${check.verdict}">${esc(check.verdictLabel)}</span>
-      <span class="sub">الرصيد شامل الشيكات بعد الفاتورة ${money(check.exposureAfter)} من حد ${money(check.creditLimit)} · الضمان ${money(check.guarantee)} · المتأخرات ${money(check.overdue)} · شيكات مرفوضة ${money(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
+      <span class="sub">${dataLine}الرصيد شامل الشيكات بعد الفاتورة ${money2(check.exposureAfter)} من حد ${money2(check.creditLimit)} · الضمان ${money2(check.guarantee)} · المتأخرات ${money2(check.overdue)} · شيكات مرفوضة ${money2(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
   }
 
   function setBusy(text) {
@@ -1327,6 +1467,13 @@
   function requestCanAct(r) {
     return !!r && r.status === 'قيد الاعتماد' && canDecide()
       && (isAdmin() || String(r.requesterUser || '').toLowerCase() !== String(state.user.username || '').toLowerCase());
+  }
+
+  // The agreement may be amended after a rejection, so a pending or rejected
+  // request stays editable for whoever may register requests. An approved
+  // request is never edited here; the actual value covers that case.
+  function canEditRequest(r) {
+    return !!r && canAdd() && (r.status === 'قيد الاعتماد' || r.status === 'مرفوض');
   }
 
   function reviewNotice(r) {
@@ -1343,7 +1490,7 @@
   }
 
   function reviewNum(label, value) {
-    return value === '' || value == null ? '' : `<dt>${esc(label)}</dt><dd>${money(value)}</dd>`;
+    return value === '' || value == null ? '' : `<dt>${esc(label)}</dt><dd>${money2(value)}</dd>`;
   }
 
   function reviewDetailsHtml(r) {
@@ -1395,6 +1542,17 @@
             <p class="sub">لم تُسجل القيمة الفعلية بعد.</p>
           </section>`
         : '';
+    const payments = (r.paymentMethod || (r.advancePayment !== '' && r.advancePayment != null)
+      || (r.weeklyPayment !== '' && r.weeklyPayment != null))
+      ? `<section class="review-block full">
+          <h3>السداد</h3>
+          <dl>
+            ${reviewFact('طريقة السداد / الخطة', r.paymentMethod)}
+            ${reviewNum('الدفعة المقدمة', r.advancePayment)}
+            ${reviewNum('الدفعة الأسبوعية', r.weeklyPayment)}
+          </dl>
+        </section>`
+      : '';
     return `
       ${notice ? `<div class="review-notice">${esc(notice)}</div>` : ''}
       <section class="review-block">
@@ -1407,6 +1565,7 @@
         </dl>
         ${r.note ? `<div class="review-note"><strong>ملاحظة مقدم الطلب</strong>${esc(r.note)}</div>` : ''}
       </section>
+      ${payments}
       <section class="review-block">
         <h3>العميل</h3>
         <dl>
@@ -1497,6 +1656,7 @@
     $('decisionCurrentSection').hidden = !state.decisionCanAct;
     $('approve').hidden = !state.decisionCanAct;
     $('reject').hidden = !state.decisionCanAct;
+    $('decisionEdit').hidden = !canEditRequest(r);
     $('approve').disabled = $('reject').disabled = true;
     const editDelivery = canDeliver() && deliveryApplies(r);
     $('deliverySection').hidden = !editDelivery;
@@ -1518,6 +1678,68 @@
     if (preview) $('approve').disabled = $('reject').disabled = false;
     setBusy(preview ? 'يتم تحديث الموقف في الخلفية…' : 'جارٍ التحقق من الطلب بالبيانات الحالية…');
     await loadDecisionCheck(r);
+  }
+
+  function openEditRequest(id) {
+    const r = state.requests.find((x) => x.id === id);
+    if (!r || !canEditRequest(r)) return;
+    if ($('decision').open) $('decision').close();
+    state.editing = r;
+    $('requestEditTitle').textContent = `تعديل الطلب ${r.id}`;
+    $('requestEditInfo').innerHTML = `<span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>`
+      + `<span>${esc(r.customer)} · ${money(r.amount)}</span>`;
+    $('editAmount').value = r.amount;
+    $('editPlan').value = r.paymentMethod || '';
+    $('editAdvance').value = r.advancePayment === '' || r.advancePayment == null ? '' : r.advancePayment;
+    $('editWeekly').value = r.weeklyPayment === '' || r.weeklyPayment == null ? '' : r.weeklyPayment;
+    $('editNote').value = r.note || '';
+    $('editPlanHint').textContent = planHint(planByName(r.paymentMethod));
+    $('editError').hidden = true;
+    $('editMsg').textContent = '';
+    $('editSave').disabled = false;
+    $('requestEdit').showModal();
+    $('requestEdit').scrollTop = 0;
+  }
+
+  async function saveEditRequest() {
+    const r = state.editing;
+    if (!r) return;
+    const amount = Number($('editAmount').value);
+    const advance = $('editAdvance').value.trim();
+    const weekly = $('editWeekly').value.trim();
+    const err = $('editError');
+    const fail = (text) => {
+      err.textContent = text;
+      err.hidden = false;
+      $('editSave').disabled = false;
+    };
+    err.hidden = true;
+    if (!(amount > 0)) { fail('قيمة الفاتورة يجب أن تكون أكبر من صفر.'); return; }
+    for (const [label, raw] of [['الدفعة المقدمة', advance], ['الدفعة الأسبوعية', weekly]]) {
+      if (raw === '') continue;
+      const n = Number(raw);
+      if (!isFinite(n) || n < 0) { fail(`${label} يجب أن تكون رقمًا غير سالب.`); return; }
+      if (n > amount) { fail(`${label} لا تزيد عن قيمة الفاتورة.`); return; }
+    }
+    $('editSave').disabled = true;
+    $('editMsg').textContent = 'جارٍ حفظ التعديل وإعادة الفحص…';
+    try {
+      const data = await callScript('edit', {
+        id: r.id, amount, note: $('editNote').value,
+        paymentMethod: $('editPlan').value.trim(), advance, weekly,
+      });
+      const updated = data.request;
+      const at = state.requests.findIndex((x) => x.id === updated.id);
+      if (at >= 0) state.requests[at] = updated;
+      state.editing = null;
+      $('requestEdit').close();
+      renderRequests();
+      if (state.customerAccount && document.body.dataset.view === 'customer') renderCustomer();
+      const label = updated.status === 'لا يحتاج اعتماد' ? 'الطلب سليم ولا يحتاج اعتمادًا.' : `أُعيد الطلب إلى ${updated.status}.`;
+      banner(`تم تعديل الطلب ${updated.id}. ${label}`);
+    } catch (e) {
+      fail(e.message);
+    }
   }
 
   async function saveDelivery() {
@@ -1881,6 +2103,8 @@
   $('requestRows').addEventListener('click', (e) => {
     const link = e.target.closest('button[data-account]');
     if (link) { openCustomer(link.dataset.account, 'requests'); return; }
+    const edit = e.target.closest('button[data-edit]');
+    if (edit) { openEditRequest(edit.dataset.edit); return; }
     const review = e.target.closest('[data-review]');
     if (review) openRequest(review.dataset.review);
   });
@@ -1934,6 +2158,13 @@
   $('reject').addEventListener('click', () => decide('reject'));
   $('decisionRetry').addEventListener('click', () => { if (state.deciding && state.decisionCanAct) loadDecisionCheck(state.deciding); });
   $('decisionClose').addEventListener('click', () => $('decision').close());
+  $('decisionEdit').addEventListener('click', () => { if (state.deciding) openEditRequest(state.deciding.id); });
+  $('editSave').addEventListener('click', saveEditRequest);
+  $('editCancel').addEventListener('click', () => $('requestEdit').close());
+  $('editPlan').addEventListener('change', () => {
+    applyPlan(planByName($('editPlan').value), Number($('editAmount').value), 'editAdvance', 'editWeekly', 'editPlanHint');
+  });
+  $('requestEdit').addEventListener('close', () => { state.editing = null; });
   $('deliverySave').addEventListener('click', saveDelivery);
   $('deliveryActual').addEventListener('input', updateActualDiff);
   $('deliveryStatus').addEventListener('change', () => {

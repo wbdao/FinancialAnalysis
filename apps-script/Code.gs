@@ -7,6 +7,8 @@
  *   ping       → تحقق سريع من الجلسة وقواعد التحليل بدون قراءة الشيتات
  *   refresh    → إعادة تجهيز نسخة البيانات الآن (للمدير)
  *   add        → تسجيل طلب فاتورة، والخادم هو الذي يحسب الفحص
+ *   edit       → تعديل طلب قيد الاعتماد أو مرفوض وإعادة إرساله
+ *   plans      → خطط السداد من شيت «طرق السداد» إن وُجد
  *   list       → طلبات نطاق المستخدم
  *   recheck    → فحص طلب بالبيانات الحالية قبل القرار
  *   decide     → اعتماد أو رفض (معتمد أو مدير)
@@ -32,8 +34,13 @@ const CHECKS_TAB = 'الشيكات (2)';
 const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون شيكات المخازن
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
+// شيت خطط السداد (اختياري). فارغ = يبحث في شيت العملاء ثم شيت الطلبات.
+// إن لم يوجد، تُدخل الدفعة المقدمة والأسبوعية يدويًا في الطلب.
+const PLANS_TAB = 'طرق السداد';
+const PLANS_FALLBACK_TAB = 'PaymantSchedual';
+const PLANS_SHEET_ID = '';
 
-const BUILD = '2026-11-06-a12';
+const BUILD = '2026-11-06-a16';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -82,6 +89,9 @@ const RULES_KEY = 'rules';
 // after reading the decision does not read the sheets again.
 const EVAL_CACHE = 'eval:v1';
 const EVAL_TTL = 60;
+// The optional payment-plan reference sheet changes rarely, so it is cached.
+const PLANS_CACHE = 'plans:v1';
+const PLANS_TTL = 300;
 // The data snapshot: the source sheets read once, gzipped into a Drive file.
 const SNAPSHOT_KEY = 'snapshot';
 const SNAPSHOT_NAME = 'موقف الفواتير - نسخة البيانات (لا تحذفها)';
@@ -101,6 +111,9 @@ const COLUMNS = {
   warehouse: 'Warehouse Group',
   group: 'Customer group',
   amount: 'قيمة الفاتورة',
+  paymentMethod: 'طريقة السداد',
+  advancePayment: 'الدفعة المقدمة',
+  weeklyPayment: 'الدفعة الأسبوعية',
   balance: 'الرصيد قبل الفاتورة',
   balanceAfter: 'الرصيد بعد الفاتورة',
   creditLimit: 'حد الائتمان',
@@ -169,8 +182,10 @@ function route_(req, who) {
       return { rules: rules_(), dataAt: meta ? meta.builtAt : 0 };
     }
     case 'data': return data_(who);
+    case 'plans': return { plans: paymentPlans_() };
     case 'list': return { requests: scopedRequests_(who) };
     case 'add': return add_(req, who);
+    case 'edit': return { request: edit_(req, who) };
     case 'recheck': return { check: recheck_(req, who) };
     case 'decide': return { request: decide_(req, who) };
     case 'deliver': return { request: deliver_(req, who) };
@@ -390,7 +405,12 @@ function clearUsersCache_() { CacheService.getScriptCache().remove(USERS_CACHE);
 
 // A manual edit of the users tab (stopping someone, changing a role) applies at once.
 function onEdit(e) {
-  if (e && e.range && e.range.getSheet().getName() === USERS_SHEET) clearUsersCache_();
+  if (!e || !e.range) return;
+  const name = e.range.getSheet().getName();
+  if (name === USERS_SHEET) clearUsersCache_();
+  if (name === PLANS_TAB || name === PLANS_FALLBACK_TAB) {
+    try { CacheService.getScriptCache().remove(PLANS_CACHE); } catch (err) { /* optional */ }
+  }
 }
 
 function isYes_(v) { return v === true || ['true', 'yes', 'نعم', '1'].indexOf(text_(v).toLowerCase()) >= 0; }
@@ -745,6 +765,7 @@ function refreshSnapshot() {
 
 function refresh_(who) {
   snapshotMemo_ = null;
+  try { CacheService.getScriptCache().remove(PLANS_CACHE); } catch (e) { /* optional */ }
   const snap = buildSnapshot_();
   audit_(publicName_(who), 'تجهيز نسخة البيانات', Math.round(snap.buildMs / 1000) + ' ثانية');
   return { builtAt: snap.builtAt, buildMs: snap.buildMs, checksError: snap.checksError, triggerError: snap.triggerError || '' };
@@ -764,6 +785,134 @@ function data_(who) {
   };
 }
 
+/* ---- payment plans (optional reference sheet) ---- */
+
+// The plan sheet may live in the customer workbook or the requests workbook.
+// If it is somewhere else, set PLANS_SHEET_ID in the settings above.
+function plansSheet_() {
+  const books = [];
+  if (PLANS_SHEET_ID) {
+    try { books.push(SpreadsheetApp.openById(PLANS_SHEET_ID)); } catch (e) { return null; }
+  } else {
+    try { books.push(sourceBook_()); } catch (e) { /* no customer link */ }
+    try { books.push(requestsBook_()); } catch (e) { /* not linked */ }
+  }
+  for (let b = 0; b < books.length; b++) {
+    const tabs = books[b].getSheets();
+    for (let t = 0; t < tabs.length; t++) {
+      const name = text_(tabs[t].getName());
+      if (name === PLANS_TAB || name === PLANS_FALLBACK_TAB) return tabs[t];
+    }
+  }
+  return null;
+}
+
+/**
+ * paymentPlans_ - the optional «طرق السداد» reference: one row per plan.
+ * It accepts the PaymantSchedual columns (PaymentSchedule, weekNum,
+ * PayQuantity, Days, 25%Start) and Arabic equivalents. A missing sheet is
+ * normal: the two payment fields are then typed by hand.
+ */
+function paymentPlans_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get(PLANS_CACHE);
+  if (hit) return JSON.parse(hit);
+  const sh = plansSheet_();
+  if (!sh) {
+    try { cache.put(PLANS_CACHE, '[]', PLANS_TTL); } catch (e) { /* optional */ }
+    return [];
+  }
+  const values = sh.getDataRange().getValues();
+  if (!values.length) return [];
+  const rawHead = values[0].map(text_);
+  const head = rawHead.map(normHeader_);
+  const at = function (aliases) {
+    const want = aliases.map(normHeader_);
+    return head.findIndex(function (h) { return want.indexOf(h) >= 0; });
+  };
+  const nameCol = at(['PaymentSchedule', 'طريقة السداد', 'طرق السداد', 'الخطة', 'خطة السداد', 'Name', 'Plan']);
+  if (nameCol < 0) return [];
+  const weeksCol = at(['weekNum', 'عدد الأسابيع', 'الأسابيع', 'Weeks']);
+  const countCol = at(['PayQuantity', 'عدد الدفعات', 'الدفعات', 'Payments', 'Installments']);
+  const daysCol = at(['Days', 'الأيام', 'أيام', 'Period', 'PeriodDays']);
+  const startCol = at(['25%Start', 'Start', 'StartPercent', 'نسبة المقدمة', 'نسبة الدفعة المقدمة']);
+  const advanceCol = at(['AdvancePayment', 'مبلغ المقدمة', 'قيمة المقدمة', 'الدفعة المقدمة', 'DownPayment']);
+  const weeklyCol = at(['WeeklyPayment', 'الدفعة الأسبوعية', 'القسط الأسبوعي', 'مبلغ الأسبوع']);
+  const noteCol = at(['ملاحظات', 'Note', 'Notes']);
+  const plans = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const name = text_(row[nameCol]);
+    if (!name) continue;
+    const advRaw = advanceCol >= 0 ? text_(row[advanceCol]) : '';
+    const weekRaw = weeklyCol >= 0 ? text_(row[weeklyCol]) : '';
+    const advPct = advanceCol >= 0 && isPercentHeader_(rawHead[advanceCol]) || /[%٪]/.test(advRaw);
+    const weekPct = weeklyCol >= 0 && isPercentHeader_(rawHead[weeklyCol]) || /[%٪]/.test(weekRaw);
+    plans.push({
+      name: name,
+      weeks: planNumber_(weeksCol >= 0 ? row[weeksCol] : ''),
+      count: planNumber_(countCol >= 0 ? row[countCol] : ''),
+      days: planNumber_(daysCol >= 0 ? row[daysCol] : ''),
+      startPercent: percent_(startCol >= 0 ? row[startCol] : ''),
+      advance: advPct ? 0 : planNumber_(advRaw),
+      advancePercent: advPct ? percent_(advRaw) : 0,
+      weekly: weekPct ? 0 : planNumber_(weekRaw),
+      weeklyPercent: weekPct ? percent_(weekRaw) : 0,
+      note: noteCol >= 0 ? text_(row[noteCol]) : '',
+    });
+  }
+  try { cache.put(PLANS_CACHE, JSON.stringify(plans), PLANS_TTL); } catch (e) { /* optional */ }
+  return plans;
+}
+
+// Header matching ignores spaces, dashes, hamza forms and the percent sign.
+function normHeader_(s) {
+  return text_(s).toLowerCase()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[٪%]/g, '')
+    .replace(/[\s_\-()]+/g, '');
+}
+
+function isPercentHeader_(h) {
+  return /[%٪]|نسب/.test(text_(h)) || normHeader_(h).indexOf('percent') >= 0;
+}
+
+// Arabic digits and separators are accepted, as the sheet may format them.
+function planNumber_(v) {
+  const s = text_(v)
+    .replace(/[٠-٩]/g, function (d) { return String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)); })
+    .replace(/[,\s٬]/g, '')
+    .replace(/[٪%]/g, '')
+    .replace(/٫/g, '.');
+  if (!s) return 0;
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
+
+// A percentage may arrive as 25%, 0.25 or 25.
+function percent_(v) {
+  const s = text_(v);
+  if (!s) return 0;
+  const n = planNumber_(s);
+  if (!n) return 0;
+  return /[%٪]/.test(s) || n <= 1 ? Math.round(n * 10000) / 100 : n;
+}
+
+// An optional money figure: empty stays empty, otherwise a non-negative number.
+function optionalMoney_(v, label) {
+  const s = text_(v)
+    .replace(/[٠-٩]/g, function (d) { return String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)); })
+    .replace(/[,\s٬]/g, '')
+    .replace(/٫/g, '.');
+  if (!s) return '';
+  const n = Number(s);
+  if (!isFinite(n)) throw new Error(label + ' يجب أن تكون رقمًا.');
+  if (n < 0) throw new Error(label + ' لا تكون سالبة.');
+  return Math.round(n * 100) / 100;
+}
+
 /* ---- the check, computed here so a browser cannot change its result ---- */
 
 // Only the fields the check reads: invoices and aging can be large, and the
@@ -771,7 +920,7 @@ function data_(who) {
 function slimCustomer_(c) {
   return {
     account: c.account, name: c.name, rep: c.rep, idNumber: c.idNumber, warehouse: c.warehouse, group: c.group,
-    balance: c.balance, creditLimit: c.creditLimit, guarantee: c.guarantee, exposure: c.exposure,
+    terms: c.terms, balance: c.balance, creditLimit: c.creditLimit, guarantee: c.guarantee, exposure: c.exposure,
     availableCredit: c.availableCredit, overdue: c.overdue, oldestOverdueDays: c.oldestOverdueDays,
     stopped: c.stopped, hasChecks: c.hasChecks,
     checksOpen: c.checksOpen, checksOpenCount: c.checksOpenCount, checksDue: c.checksDue,
@@ -814,10 +963,12 @@ function evaluate_(who, account, amount) {
     .map(function (x) { return x.label; }).join('، ');
   return {
     account: c.account, customer: c.name, rep: c.rep, idNumber: c.idNumber, warehouse: c.warehouse, group: c.group,
+    terms: c.terms,
     amount: amount, balance: c.balance, balanceAfter: result.balanceAfter, creditLimit: c.creditLimit, guarantee: c.guarantee,
     uncovered: result.uncovered, overdue: c.overdue, oldestDays: c.oldestOverdueDays,
     checksOpen: c.checksOpen, checksDue: c.checksDue, checksRejected: c.checksRejected, exposureAfter: result.exposureAfter,
     dataDate: Utilities.formatDate(new Date(analysisDay * 86400000), 'UTC', 'yyyy-MM-dd'),
+    dataAt: meta ? meta.builtAt : 0,
     verdict: result.verdict, verdictLabel: VERDICTS[result.verdict], reasons: reasons,
   };
 }
@@ -830,6 +981,11 @@ function add_(req, who) {
   const amount = Number(req.amount);
   if (!account) throw new Error('كود العميل مطلوب.');
   if (!(amount > 0)) throw new Error('قيمة الفاتورة يجب أن تكون أكبر من صفر.');
+  const paymentMethod = safe_(req.paymentMethod);
+  const advance = optionalMoney_(req.advance, 'الدفعة المقدمة');
+  const weekly = optionalMoney_(req.weekly, 'الدفعة الأسبوعية');
+  if (advance !== '' && advance > amount) throw new Error('الدفعة المقدمة لا تزيد عن قيمة الفاتورة.');
+  if (weekly !== '' && weekly > amount) throw new Error('الدفعة الأسبوعية لا تزيد عن قيمة الفاتورة.');
   // Reading the customer sheets is slow, so it stays outside the lock.
   const check = evaluate_(who, account, amount);
   return locked_(function () {
@@ -837,7 +993,13 @@ function add_(req, who) {
     const all = readAll_(sh);
     // A retried send must not create a second request.
     const ref = text_(req.ref);
-    const again = ref && all.filter(function (r) { return r.ref === ref; })[0];
+    // A retry belongs to the same requester and customer in their scope; another
+    // user's ref must never bring back a request they may not see.
+    const requesterUser = who.username === BREAK_GLASS ? 'admin' : who.username;
+    const again = ref && all.filter(function (r) {
+      return text_(r.ref) === ref && text_(r.account) === account
+        && normUser_(r.requesterUser) === requesterUser && inScope_(who, r.warehouse);
+    })[0];
     if (again) return { request: again, duplicate: true };
     const row = {};
     Object.keys(COLUMNS).forEach(function (f) { row[f] = ''; });
@@ -848,8 +1010,11 @@ function add_(req, who) {
     row.createdAt = now_();
     row.verdict = check.verdictLabel;
     row.requester = safe_(who.name);
-    row.requesterUser = who.username === BREAK_GLASS ? 'admin' : who.username;
+    row.requesterUser = requesterUser;
     row.note = safe_(req.note);
+    row.paymentMethod = paymentMethod;
+    row.advancePayment = advance;
+    row.weeklyPayment = weekly;
     row.ref = safe_(ref);
     // A clean check needs no approver; anything else waits for one.
     row.status = check.verdict === 'ok' ? STATUS.clear : STATUS.pending;
@@ -862,6 +1027,75 @@ function add_(req, who) {
     }));
     audit_(publicName_(who), 'تسجيل طلب', row.id + ' · ' + row.customer + ' · ' + row.amount + ' · ' + row.verdict);
     return { request: row };
+  });
+}
+
+/**
+ * edit_ - the agreement may change after a rejection, so a pending or rejected
+ * request can be amended and sent back for approval. The script recomputes the
+ * check with the new amount; an approved request is never changed here.
+ */
+function edit_(req, who) {
+  if (!hasPerm_(who, PERM.add)) throw new Error('تعديل الطلب يتطلب صلاحية تسجيل الطلبات.');
+  const r = findRequest_(who, req.id);
+  const current = text_(r.status);
+  if (current !== STATUS.pending && current !== STATUS.rejected) {
+    throw new Error('لا يمكن تعديل طلب حالته: ' + current + '.');
+  }
+  const account = text_(r.account);
+  const amount = Number(req.amount);
+  if (!account) throw new Error('كود العميل غير موجود في الطلب.');
+  if (!(amount > 0)) throw new Error('قيمة الفاتورة يجب أن تكون أكبر من صفر.');
+  const note = safe_(req.note);
+  const paymentMethod = safe_(req.paymentMethod);
+  const advance = optionalMoney_(req.advance, 'الدفعة المقدمة');
+  const weekly = optionalMoney_(req.weekly, 'الدفعة الأسبوعية');
+  if (advance !== '' && advance > amount) throw new Error('الدفعة المقدمة لا تزيد عن قيمة الفاتورة.');
+  if (weekly !== '' && weekly > amount) throw new Error('الدفعة الأسبوعية لا تزيد عن قيمة الفاتورة.');
+  // The check always follows the amount, so the approver sees the new figure.
+  const check = evaluate_(who, account, amount);
+  return locked_(function () {
+    const sh = requestsSheet_();
+    const headers = headers_(sh);
+    const lastRow = sh.getLastRow();
+    const values = lastRow < 2 ? [] : sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const idCol = headers.indexOf(COLUMNS.id);
+    const at = values.findIndex(function (v) { return text_(v[idCol]) === text_(req.id); });
+    if (at < 0) throw new Error('الطلب غير موجود: ' + text_(req.id));
+    const statusCol = headers.indexOf(COLUMNS.status);
+    const beforeStatus = text_(values[at][statusCol]);
+    if (beforeStatus !== STATUS.pending && beforeStatus !== STATUS.rejected) {
+      throw new Error('لا يمكن تعديل طلب حالته: ' + beforeStatus + '.');
+    }
+    const row = values[at].slice();
+    // Only these cells are written, so formulas in the user's own columns stay.
+    const put = function (field, value) {
+      const col = headers.indexOf(COLUMNS[field]);
+      sh.getRange(at + 2, col + 1).setValue(value);
+      row[col] = value;
+    };
+    ['amount', 'balance', 'balanceAfter', 'creditLimit', 'guarantee', 'uncovered', 'overdue', 'oldestDays',
+      'checksOpen', 'checksDue', 'checksRejected', 'exposureAfter'].forEach(function (f) { put(f, check[f]); });
+    ['dataDate', 'verdict', 'reasons'].forEach(function (f) { put(f, safe_(check[f])); });
+    put('note', note);
+    put('paymentMethod', paymentMethod);
+    put('advancePayment', advance);
+    put('weeklyPayment', weekly);
+    // A rejected request goes back to the queue. A clean check needs no approver.
+    const nextStatus = check.verdict === 'ok' ? STATUS.clear : STATUS.pending;
+    put('status', nextStatus);
+    put('approver', '');
+    put('decidedAt', '');
+    put('decisionNote', '');
+    put('verdictAtDecision', '');
+    put('deliveryStatus', nextStatus === STATUS.clear ? DELIVERY.warehouse : '');
+    audit_(publicName_(who), 'تعديل طلب',
+      text_(req.id) + ' · ' + text_(r.customer) + ' · ' + Number(r.amount) + ' → ' + amount
+      + ' · ' + beforeStatus + ' → ' + nextStatus
+      + (paymentMethod ? ' · ' + paymentMethod : '')
+      + (advance !== '' ? ' · مقدمة ' + advance : '')
+      + (weekly !== '' ? ' · أسبوعي ' + weekly : ''));
+    return rowToObject_(headers, row);
   });
 }
 
@@ -912,13 +1146,21 @@ function decide_(req, who) {
       sh.getRange(at + 2, col + 1).setValue(value);
       row[col] = value;
     };
-    put('status', decision);
-    if (decision === STATUS.approved) put('deliveryStatus', DELIVERY.warehouse);
-    put('approver', safe_(publicName_(who)));
-    put('decidedAt', now_());
-    put('decisionNote', safe_(req.note));
-    put('verdictAtDecision', check.verdictLabel + (check.reasons ? ': ' + safe_(check.reasons) : ''));
-    audit_(publicName_(who), decision, text_(req.id) + ' · ' + text_(r.customer) + ' · ' + Number(r.amount));
+    const detail = text_(req.id) + ' · ' + text_(r.customer) + ' · ' + Number(r.amount);
+    // The audit row is written first: a decision without a trace is not a decision.
+    auditRequired_(publicName_(who), decision, detail);
+    try {
+      put('status', decision);
+      if (decision === STATUS.approved) put('deliveryStatus', DELIVERY.warehouse);
+      put('approver', safe_(publicName_(who)));
+      put('decidedAt', now_());
+      put('decisionNote', safe_(req.note));
+      put('verdictAtDecision', check.verdictLabel + (check.reasons ? ': ' + safe_(check.reasons) : ''));
+    } catch (e) {
+      // The log already says the decision started; record why it did not finish.
+      audit_(publicName_(who), 'تعذّر تنفيذ القرار', detail + ' · ' + e.message);
+      throw e;
+    }
     return rowToObject_(headers, row);
   });
 }
@@ -977,25 +1219,31 @@ function deliver_(req, who) {
       row[col] = value;
     };
     const before = text_(values[at][headers.indexOf(COLUMNS.deliveryStatus)]) || 'لم يبدأ';
-    put('deliveryStatus', status);
-    put('deliveryDue', due);
-    put('deliveryAt', deliveredAt);
-    put('deliveryReason', status ? reason : '');
-    put('deliveryNote', status ? note : '');
-    put('deliveryBy', status ? safe_(publicName_(who)) : '');
-    put('deliveryUpdatedAt', now_());
-    // Only stamp who changed the actual value, and when, when it really changed.
-    const prevActual = storedActual_(values[at][headers.indexOf(COLUMNS.actualAmount)]);
-    put('actualAmount', actual);
-    put('actualNote', actual === '' ? '' : actualNote);
-    if (String(prevActual) !== String(actual)) {
-      put('actualBy', actual === '' ? '' : safe_(publicName_(who)));
-      put('actualAt', actual === '' ? '' : now_());
-    }
-    audit_(publicName_(who), 'تحديث التسليم',
-      text_(req.id) + ' · ' + before + ' → ' + (status || 'لم يبدأ')
+    const detail = text_(req.id) + ' · ' + before + ' → ' + (status || 'لم يبدأ')
       + (reason ? ' · ' + reason : '')
-      + (actual !== '' ? ' · الفعلي: ' + actual + (actualNote ? ' · ' + actualNote : '') : ''));
+      + (actual !== '' ? ' · الفعلي: ' + actual + (actualNote ? ' · ' + actualNote : '') : '');
+    // Delivery moves stock and money: it is logged before any cell changes.
+    auditRequired_(publicName_(who), 'تحديث التسليم', detail);
+    try {
+      put('deliveryStatus', status);
+      put('deliveryDue', due);
+      put('deliveryAt', deliveredAt);
+      put('deliveryReason', status ? reason : '');
+      put('deliveryNote', status ? note : '');
+      put('deliveryBy', status ? safe_(publicName_(who)) : '');
+      put('deliveryUpdatedAt', now_());
+      // Only stamp who changed the actual value, and when, when it really changed.
+      const prevActual = storedActual_(values[at][headers.indexOf(COLUMNS.actualAmount)]);
+      put('actualAmount', actual);
+      put('actualNote', actual === '' ? '' : actualNote);
+      if (String(prevActual) !== String(actual)) {
+        put('actualBy', actual === '' ? '' : safe_(publicName_(who)));
+        put('actualAt', actual === '' ? '' : now_());
+      }
+    } catch (e) {
+      audit_(publicName_(who), 'تعذّر تنفيذ تحديث التسليم', detail + ' · ' + e.message);
+      throw e;
+    }
     return rowToObject_(headers, row);
   });
 }
@@ -1099,8 +1347,17 @@ function audit_(who, action, detail) {
     const sh = book.getSheetByName(LOG_SHEET) || book.insertSheet(LOG_SHEET);
     if (!sh.getLastRow()) sh.appendRow(['الوقت', 'المستخدم', 'العملية', 'التفاصيل']);
     sh.appendRow([now_(), safe_(who), action, safe_(detail)]);
+    return true;
   } catch (e) {
     console.warn('audit not written: ' + e.message);
+    return false;
+  }
+}
+
+// Critical actions must leave a trace; a failed append stops the action.
+function auditRequired_(who, action, detail) {
+  if (!audit_(who, action, detail)) {
+    throw new Error('تعذّر تسجيل العملية في سجل العمليات، فلم تُنفذ. حاول مرة أخرى.');
   }
 }
 

@@ -102,14 +102,16 @@ function fakeDrive() {
 
 /**
  * @param {{password?: string, sourceId?: string, source?: {base: Array, tx: Array},
- *     checksId?: string, checks?: {main: Array, wh?: Array}}} options checksId 'CHECKS' opens `checks`.
+ *     checksId?: string, checks?: {main: Array, wh?: Array},
+ *     plans?: Array, plansTab?: string}} options checksId 'CHECKS' opens `checks`.
  */
 function loadScript(options = {}) {
-  const { password = 'admin-test-pass', sourceId = 'SOURCE', source = { base: [[]], tx: [[]] }, checksId = '', checks = null, triggersAllowed = true } = options;
+  const { password = 'admin-test-pass', sourceId = 'SOURCE', source = { base: [[]], tx: [[]] }, checksId = '', checks = null, triggersAllowed = true, plans = null, plansTab = 'طرق السداد' } = options;
   const book = fakeBook();
   const sourceBook = fakeBook();
   sourceBook.sheets.set('قاعده عملاء الشركه', new FakeSheet(source.base));
   sourceBook.sheets.set('حركات العملاء', new FakeSheet(source.tx));
+  if (plans) sourceBook.sheets.set(plansTab, new FakeSheet(plans));
   const checksBook = fakeBook();
   if (checks) {
     checksBook.sheets.set('الشيكات (2)', new FakeSheet(checks.main));

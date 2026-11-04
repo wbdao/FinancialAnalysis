@@ -1358,6 +1358,18 @@ dialog .cards { margin-top: 4px; }
 .delivery-actual .delivery-grid { margin-bottom: 6px; }
 .delivery-actual .sub { margin: 0; }
 
+/* Payment plan fields: method, advance and weekly amount. */
+.pay-grid, .edit-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+.edit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.request-form .field, #requestEdit .field { max-width: none; }
+#requestEdit { width: min(560px, calc(100vw - 32px)); }
+.row-actions { white-space: nowrap; }
+.row-actions .ghost { margin-inline-start: 4px; }
+
 /* ---- scrollbars ---------------------------------------------------------- */
 
 @media (pointer: fine) {
@@ -1443,6 +1455,7 @@ dialog .cards { margin-top: 4px; }
   .table-card th { position: static; }
   th, td { padding: 9px 11px; }
   .field { flex: 1 1 100%; }
+  .pay-grid, .edit-grid { grid-template-columns: 1fr; }
 
   .login-view { padding: 18px 14px; }
   .login-card { grid-template-columns: 1fr; border-radius: 18px; }
