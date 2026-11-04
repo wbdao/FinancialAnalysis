@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0b2f29">
   <title>موقف الفواتير · لوحة التحكم</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Cpath d='M9 22V14M16 22V9M23 22v-5' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=14">
+  <link rel="stylesheet" href="styles.css?v=15">
 </head>
 <body data-view="login">
 
@@ -338,6 +338,19 @@
                   <option value="">الكل</option>
                 </select>
               </label>
+              <label class="field compact">حالة التسليم
+                <select id="requestDelivery">
+                  <option value="">الكل</option>
+                  <option value="none">لم يبدأ</option>
+                  <option value="في أرضية المخزن">في أرضية المخزن</option>
+                  <option value="جاري التسليم">جاري التسليم</option>
+                  <option value="تم التسليم">تم التسليم</option>
+                  <option value="متعذر التسليم">متعذر التسليم</option>
+                </select>
+              </label>
+              <label class="check compact">
+                <input id="requestLate" type="checkbox"> المتأخر فقط
+              </label>
               <label class="field compact">من تاريخ
                 <input id="requestFrom" type="date">
               </label>
@@ -351,7 +364,7 @@
                 <thead>
                   <tr>
                     <th>الطلب</th><th>العميل</th><th class="n">القيمة</th><th>الفحص</th><th>مقدم الطلب</th>
-                    <th>الاعتماد</th><th></th>
+                    <th>الاعتماد</th><th>التسليم</th><th></th>
                   </tr>
                 </thead>
                 <tbody id="requestRows"></tbody>
@@ -419,6 +432,7 @@
                 <select id="userRole">
                   <option value="موظف">موظف: يفحص ويسجل الطلبات</option>
                   <option value="معتمد">معتمد: يعتمد الطلبات أيضًا</option>
+                  <option value="محاسب مخزن">محاسب مخزن: متابعة التسليم فقط</option>
                   <option value="مدير">مدير: كل الصلاحيات والمستخدمون والقواعد</option>
                 </select>
               </label>
@@ -512,6 +526,44 @@
     <h2 id="decisionTitle"></h2>
     <p id="decisionInfo" class="review-meta"></p>
     <div id="decisionDetails" class="review-details"></div>
+    <section id="deliverySection" class="delivery-editor" hidden>
+      <h3>تحديث حالة التسليم</h3>
+      <div class="delivery-grid">
+        <label class="field">حالة التسليم
+          <select id="deliveryStatus">
+            <option value="">لم يبدأ التسليم</option>
+            <option value="في أرضية المخزن">في أرضية المخزن</option>
+            <option value="جاري التسليم">جاري التسليم</option>
+            <option value="تم التسليم">تم التسليم</option>
+            <option value="متعذر التسليم">متعذر التسليم</option>
+          </select>
+        </label>
+        <label class="field">موعد التسليم المخطط
+          <input id="deliveryDue" type="date">
+        </label>
+        <label class="field">تاريخ التسليم الفعلي
+          <input id="deliveryAt" type="date">
+        </label>
+        <label class="field">سبب التأخير
+          <select id="deliveryReason">
+            <option value="">بدون سبب</option>
+            <option value="عدم توافر عربيات النقل">عدم توافر عربيات النقل</option>
+            <option value="العميل غير جاهز">العميل غير جاهز</option>
+            <option value="نقص أصناف">نقص أصناف</option>
+            <option value="مشكلة مستندات">مشكلة مستندات</option>
+            <option value="أخرى">أخرى</option>
+          </select>
+        </label>
+      </div>
+      <label class="field">ملاحظات التسليم
+        <textarea id="deliveryNote" rows="2"></textarea>
+      </label>
+      <p id="deliveryMsg" class="muted" role="status"></p>
+      <p id="deliveryError" class="form-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="deliverySave" class="btn">حفظ حالة التسليم</button>
+      </div>
+    </section>
     <div id="decisionCurrentSection">
       <h3>الفحص الحالي</h3>
       <div id="decisionCurrent" class="note-box" aria-live="polite"></div>
@@ -531,8 +583,8 @@
     </div>
   </dialog>
 
-  <script src="engine.js?v=14"></script>
-  <script src="demo.js?v=14"></script>
-  <script src="app.js?v=14"></script>
+  <script src="engine.js?v=15"></script>
+  <script src="demo.js?v=15"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>

@@ -33,7 +33,7 @@ const CHECKS_WH_TAB = 'شيكات المخازن';       // فارغ = بدون 
 // اتركه فارغًا إذا كان السكربت من داخل شيت الطلبات، وإلا ضع معرّف شيت الطلبات
 const SPREADSHEET_ID = '';
 
-const BUILD = '2026-11-06-a9';
+const BUILD = '2026-11-06-a10';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -42,9 +42,21 @@ const ID_PREFIX = 'REQ';
 const ID_DIGITS = 6;
 const STATUS = { pending: 'قيد الاعتماد', approved: 'معتمد', rejected: 'مرفوض', clear: 'لا يحتاج اعتماد' };
 const VERDICTS = { ok: 'سليمة', warn: 'تحتاج موافقة', stop: 'موقوفة' };
+// Delivery is a second axis: an approved request can still sit in the warehouse
+// waiting for a truck, so it never changes the approval status above.
+const DELIVERY = {
+  warehouse: 'في أرضية المخزن',
+  transit: 'جاري التسليم',
+  delivered: 'تم التسليم',
+  failed: 'متعذر التسليم',
+};
+const DELIVERY_LIST = [DELIVERY.warehouse, DELIVERY.transit, DELIVERY.delivered, DELIVERY.failed];
+const DELIVERY_REASONS = [
+  'عدم توافر عربيات النقل', 'العميل غير جاهز', 'نقص أصناف', 'مشكلة مستندات', 'أخرى',
+];
 
-const ROLE_USER = 'موظف', ROLE_APPROVER = 'معتمد', ROLE_ADMIN = 'مدير';
-const ROLES = [ROLE_USER, ROLE_APPROVER, ROLE_ADMIN];
+const ROLE_USER = 'موظف', ROLE_APPROVER = 'معتمد', ROLE_ADMIN = 'مدير', ROLE_DELIVERY = 'محاسب مخزن';
+const ROLES = [ROLE_USER, ROLE_APPROVER, ROLE_DELIVERY, ROLE_ADMIN];
 const ALL_WAREHOUSES = 'الكل';
 const BREAK_GLASS = '*admin*';
 const LOGIN_NEEDED = 'سجّل الدخول من جديد.';
@@ -102,6 +114,13 @@ const COLUMNS = {
   checksRejected: 'شيكات مرفوضة',
   exposureAfter: 'التعرض بعد الفاتورة (شامل الشيكات)',
   ref: 'مرجع الإرسال',
+  deliveryStatus: 'حالة التسليم',
+  deliveryDue: 'موعد التسليم المخطط',
+  deliveryAt: 'تاريخ التسليم الفعلي',
+  deliveryReason: 'سبب تأخير التسليم',
+  deliveryNote: 'ملاحظات التسليم',
+  deliveryBy: 'محدّث التسليم',
+  deliveryUpdatedAt: 'وقت تحديث التسليم',
 };
 const USER_COLUMNS = {
   username: 'اسم المستخدم', name: 'الاسم', role: 'الصلاحية', active: 'مفعّل',
@@ -139,6 +158,7 @@ function route_(req, who) {
     case 'add': return add_(req, who);
     case 'recheck': return { check: recheck_(req, who) };
     case 'decide': return { request: decide_(req, who) };
+    case 'deliver': return { request: deliver_(req, who) };
     case 'changePassword': return changePassword_(req, who);
     case 'users': requireAdmin_(who); return { users: usersList_() };
     case 'audit': requireAdmin_(who); return { audit: auditList_(req) };
@@ -738,6 +758,8 @@ function add_(req, who) {
     row.ref = safe_(ref);
     // A clean check needs no approver; anything else waits for one.
     row.status = check.verdict === 'ok' ? STATUS.clear : STATUS.pending;
+    // Approved work starts physically in the warehouse until the delivery clerk moves it.
+    row.deliveryStatus = check.verdict === 'ok' ? DELIVERY.warehouse : '';
     const headers = headers_(sh);
     sh.appendRow(headers.map(function (h) {
       const f = fieldOf_(h);
@@ -796,6 +818,7 @@ function decide_(req, who) {
       row[col] = value;
     };
     put('status', decision);
+    if (decision === STATUS.approved) put('deliveryStatus', DELIVERY.warehouse);
     put('approver', safe_(publicName_(who)));
     put('decidedAt', now_());
     put('decisionNote', safe_(req.note));
@@ -804,6 +827,78 @@ function decide_(req, who) {
     return rowToObject_(headers, row);
   });
 }
+
+function requireDeliverer_(who) {
+  if (who.role !== ROLE_DELIVERY && who.role !== ROLE_APPROVER && who.role !== ROLE_ADMIN) {
+    throw new Error('تحديث التسليم لصلاحية محاسب مخزن أو معتمد أو مدير.');
+  }
+}
+
+/**
+ * deliver_ - the delivery clerk moves an approved request between the warehouse,
+ * the road and the customer. It never touches the approval status or the check,
+ * and it writes only the delivery cells so the user's own columns keep their formulas.
+ */
+function deliver_(req, who) {
+  const status = text_(req.status);
+  if (status && DELIVERY_LIST.indexOf(status) < 0) throw new Error('حالة التسليم غير معروفة: ' + status);
+  const reason = text_(req.reason);
+  if (reason && DELIVERY_REASONS.indexOf(reason) < 0) throw new Error('سبب التأخير غير معروف: ' + reason);
+  if (status === DELIVERY.failed && !reason) throw new Error('اكتب سبب تعذر التسليم.');
+  const due = dateOnly_(req.due);
+  const deliveredAt = status === DELIVERY.delivered ? (dateOnly_(req.at) || today_()) : '';
+  const note = safe_(req.note);
+  const r = findRequest_(who, req.id);
+  requireDeliverer_(who);
+  if (text_(r.status) !== STATUS.approved && text_(r.status) !== STATUS.clear) {
+    throw new Error('لا يمكن تسجيل تسليم لطلب لم يُعتمد: ' + text_(r.status));
+  }
+  return locked_(function () {
+    const sh = requestsSheet_();
+    const headers = headers_(sh);
+    const lastRow = sh.getLastRow();
+    const values = lastRow < 2 ? [] : sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const idCol = headers.indexOf(COLUMNS.id);
+    const at = values.findIndex(function (v) { return text_(v[idCol]) === text_(req.id); });
+    if (at < 0) throw new Error('الطلب غير موجود: ' + text_(req.id));
+    // The approval may have changed while we waited for the lock.
+    const current = text_(values[at][headers.indexOf(COLUMNS.status)]);
+    if (current !== STATUS.approved && current !== STATUS.clear) {
+      throw new Error('لا يمكن تسجيل تسليم لطلب لم يُعتمد: ' + current);
+    }
+    const row = values[at].slice();
+    const put = function (field, value) {
+      const col = headers.indexOf(COLUMNS[field]);
+      sh.getRange(at + 2, col + 1).setValue(value);
+      row[col] = value;
+    };
+    const before = text_(values[at][headers.indexOf(COLUMNS.deliveryStatus)]) || 'لم يبدأ';
+    put('deliveryStatus', status);
+    put('deliveryDue', due);
+    put('deliveryAt', deliveredAt);
+    put('deliveryReason', status ? reason : '');
+    put('deliveryNote', status ? note : '');
+    put('deliveryBy', status ? safe_(publicName_(who)) : '');
+    put('deliveryUpdatedAt', now_());
+    audit_(publicName_(who), 'تحديث التسليم',
+      text_(req.id) + ' · ' + before + ' → ' + (status || 'لم يبدأ') + (reason ? ' · ' + reason : ''));
+    return rowToObject_(headers, row);
+  });
+}
+
+function dateOnly_(v) {
+  const s = text_(v).slice(0, 10);
+  if (!s) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error('التاريخ يجب أن يكون بصيغة YYYY-MM-DD.');
+  const p = s.split('-').map(Number);
+  const d = new Date(p[0], p[1] - 1, p[2]);
+  if (d.getFullYear() !== p[0] || d.getMonth() !== p[1] - 1 || d.getDate() !== p[2]) {
+    throw new Error('تاريخ غير صالح: ' + s);
+  }
+  return s;
+}
+
+function today_() { return now_().slice(0, 10); }
 
 /* ---- sheet helpers ---- */
 

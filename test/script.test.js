@@ -58,7 +58,7 @@ test('the placeholder admin password refuses every request', () => {
 
 test('every action but login needs a session', () => {
   const s = setup();
-  for (const action of ['data', 'ping', 'list', 'add', 'users', 'audit', 'decide']) {
+  for (const action of ['data', 'ping', 'list', 'add', 'users', 'audit', 'decide', 'deliver']) {
     const r = s.post({ action, token: 'made-up' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.login, true);
@@ -234,6 +234,55 @@ test('decide: role, own requests, scope, single decision and a current check', (
   // The admin alone may decide their own request.
   const adminOwn = s.call(s.admin, 'add', { account: 'A1', amount: 1 }).request.id;
   assert.strictEqual(decide(s.admin, adminOwn, 'approve').request.status, 'معتمد');
+});
+
+test('deliver: only a delivery role, only approved, with dates and a reason', () => {
+  const s = setup();
+  const clerk = s.addUser('sara', 'موظف');
+  const delivery = s.addUser('mona', 'محاسب مخزن');
+  const outsider = s.addUser('nour', 'محاسب مخزن', ['70']);
+  const approver = s.addUser('amr', 'معتمد');
+  const id = s.call(clerk, 'add', { account: 'A1', amount: 3000 }).request.id;
+  const deliver = (t, extra) => s.call(t, 'deliver', Object.assign({ id }, extra));
+
+  assert.match(deliver(delivery, { status: 'في أرضية المخزن' }).error, /لم يُعتمد/);
+  assert.match(deliver(clerk, { status: 'في أرضية المخزن' }).error, /محاسب مخزن/);
+  assert.ok(s.call(approver, 'decide', { id, decision: 'approve' }).ok);
+
+  assert.match(deliver(outsider, { status: 'في أرضية المخزن' }).error, /خارج نطاق/);
+  assert.match(deliver(delivery, { status: 'حالة خاطئة' }).error, /غير معروفة/);
+  assert.match(deliver(delivery, { status: 'متعذر التسليم' }).error, /سبب تعذر/);
+  assert.match(deliver(delivery, { status: 'جاري التسليم', due: '01/02/2026' }).error, /YYYY-MM-DD/);
+  assert.match(deliver(delivery, { status: 'جاري التسليم', due: '2026-13-01' }).error, /تاريخ غير صالح/);
+
+  const moved = deliver(delivery, { status: 'جاري التسليم', due: '2026-11-05', reason: 'عدم توافر عربيات النقل' });
+  assert.strictEqual(moved.request.deliveryStatus, 'جاري التسليم');
+  assert.strictEqual(moved.request.deliveryDue, '2026-11-05');
+  assert.strictEqual(moved.request.deliveryAt, '');
+  assert.strictEqual(moved.request.deliveryBy, 'اسم mona');
+  assert.strictEqual(moved.request.status, 'معتمد');
+
+  const done = deliver(delivery, { status: 'تم التسليم', due: '2026-11-05', at: '2026-11-07', reason: 'عدم توافر عربيات النقل' });
+  assert.strictEqual(done.request.deliveryStatus, 'تم التسليم');
+  assert.strictEqual(done.request.deliveryAt, '2026-11-07');
+  assert.strictEqual(done.request.deliveryReason, 'عدم توافر عربيات النقل');
+
+  const cleared = deliver(delivery, { status: '' });
+  assert.strictEqual(cleared.request.deliveryStatus, '');
+  assert.strictEqual(cleared.request.deliveryDue, '');
+  assert.strictEqual(cleared.request.deliveryAt, '');
+});
+
+test('delivery starts in the warehouse for a clean request and after approval', () => {
+  const s = setup();
+  const clean = s.call(s.admin, 'add', { account: 'B1', amount: 100 }).request;
+  assert.strictEqual(clean.status, 'لا يحتاج اعتماد');
+  assert.strictEqual(clean.deliveryStatus, 'في أرضية المخزن');
+
+  const id = s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request.id;
+  assert.strictEqual(s.call(s.admin, 'list').requests.find((r) => r.id === id).deliveryStatus, '');
+  s.call(s.admin, 'decide', { id, decision: 'approve' });
+  assert.strictEqual(s.call(s.admin, 'list').requests.find((r) => r.id === id).deliveryStatus, 'في أرضية المخزن');
 });
 
 test('list: a warehouse user sees only requests of their warehouses', () => {

@@ -24,6 +24,22 @@
   };
   const ROLE_ADMIN = 'مدير';
   const ROLE_APPROVER = 'معتمد';
+  const ROLE_DELIVERY = 'محاسب مخزن';
+  // Delivery is tracked beside approval: an approved order can wait in the
+  // warehouse for a truck without changing its approval status.
+  const DELIVERY = {
+    warehouse: 'في أرضية المخزن',
+    transit: 'جاري التسليم',
+    delivered: 'تم التسليم',
+    failed: 'متعذر التسليم',
+  };
+  const DELIVERY_REASONS = ['عدم توافر عربيات النقل', 'العميل غير جاهز', 'نقص أصناف', 'مشكلة مستندات', 'أخرى'];
+  const DELIVERY_TAG = {
+    [DELIVERY.warehouse]: 'warn',
+    [DELIVERY.transit]: 'paid',
+    [DELIVERY.delivered]: 'ok',
+    [DELIVERY.failed]: 'stop',
+  };
   const THEME_KEY = 'financialAnalysis.theme';
   // The snapshot is a read cache: decisions still go to the script.
   const CACHE_DB = 'financialAnalysis.cache';
@@ -221,7 +237,45 @@
   /* ---- session --------------------------------------------------------------- */
 
   const canDecide = () => !!state.user && (state.user.role === ROLE_ADMIN || state.user.role === ROLE_APPROVER);
+  const canDeliver = () => !!state.user
+    && (state.user.role === ROLE_ADMIN || state.user.role === ROLE_APPROVER || state.user.role === ROLE_DELIVERY);
   const isAdmin = () => !!state.user && state.user.role === ROLE_ADMIN;
+
+  // Delivery only starts once the request is approved (or needs no approval).
+  const deliveryApplies = (r) => !!r && (r.status === 'معتمد' || r.status === 'لا يحتاج اعتماد');
+
+  function todayStr() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  // Whole days from `earlier` to `later`, both yyyy-MM-dd.
+  function dayDiff(later, earlier) {
+    const a = String(later || '').slice(0, 10).split('-').map(Number);
+    const b = String(earlier || '').slice(0, 10).split('-').map(Number);
+    if (a.length !== 3 || b.length !== 3 || a.some(isNaN) || b.some(isNaN)) return 0;
+    return Math.round((Date.UTC(a[0], a[1] - 1, a[2]) - Date.UTC(b[0], b[1] - 1, b[2])) / 86400000);
+  }
+
+  function deliveryLate(r) {
+    if (!r || !r.deliveryDue || r.deliveryStatus === DELIVERY.delivered) return 0;
+    return Math.max(0, dayDiff(todayStr(), r.deliveryDue));
+  }
+
+  function deliveryWasLate(r) {
+    if (!r || !r.deliveryDue || !r.deliveryAt) return 0;
+    return Math.max(0, dayDiff(r.deliveryAt, r.deliveryDue));
+  }
+
+  function deliveryChip(r) {
+    if (!r.deliveryStatus) return '<span class="tag paid">لم يبدأ التسليم</span>';
+    const late = deliveryLate(r);
+    const wasLate = deliveryWasLate(r);
+    return `<span class="tag ${DELIVERY_TAG[r.deliveryStatus] || 'paid'}">${esc(r.deliveryStatus)}</span>`
+      + (late ? `<span class="sub late">متأخر ${late} يوم</span>` : '')
+      + (wasLate ? `<span class="sub late">سُلّم متأخرًا ${wasLate} يوم</span>` : '');
+  }
 
   function setUser(user) {
     state.user = user;
@@ -876,13 +930,14 @@
       .reverse();
     if (!list.length) return '<p class="empty">لا توجد طلبات مسجلة لهذا العميل.</p>';
     return `<div class="table-wrap compact-table"><table>
-      <thead><tr><th>الطلب</th><th class="n">القيمة</th><th>الفحص</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+      <thead><tr><th>الطلب</th><th class="n">القيمة</th><th>الفحص</th><th>الحالة</th><th>التسليم</th><th>التاريخ</th></tr></thead>
       <tbody>${list.slice(0, 20).map((r) => `
         <tr>
           <td><button type="button" class="link-btn" data-review-request="${esc(r.id)}">${esc(r.id)}</button><span class="sub">${esc(r.requester || '')}</span></td>
           <td class="n">${money(r.amount)}</td>
           <td><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict)}</span><span class="sub">${esc(r.reasons || '')}</span></td>
           <td><span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
+          <td>${deliveryApplies(r) ? deliveryChip(r) : '<span class="sub">—</span>'}${r.deliveryDue ? `<span class="sub">الموعد: ${esc(r.deliveryDue)}</span>` : ''}</td>
           <td class="date">${esc(r.createdAt)}</td>
         </tr>`).join('')}</tbody>
     </table></div>${list.length > 20 ? `<p class="muted profile-note">يُعرض أحدث 20 طلبًا من ${money(list.length)}.</p>` : ''}`;
@@ -1015,6 +1070,8 @@
   function requestFilters() {
     return {
       status: $('requestStatus').value,
+      delivery: $('requestDelivery').value,
+      late: $('requestLate').checked,
       from: $('requestFrom').value,
       to: $('requestTo').value,
       q: $('requestQuery').value.trim().toLowerCase(),
@@ -1023,11 +1080,14 @@
 
   function requestMatches(r, f) {
     if (f.status && r.status !== f.status) return false;
+    if (f.delivery === 'none' && r.deliveryStatus) return false;
+    if (f.delivery && f.delivery !== 'none' && r.deliveryStatus !== f.delivery) return false;
+    if (f.late && deliveryLate(r) === 0) return false;
     const day = String(r.createdAt || '').slice(0, 10);
     if (f.from && day < f.from) return false;
     if (f.to && day > f.to) return false;
     if (!f.q) return true;
-    return [r.id, r.customer, r.account, r.rep, r.requester, r.note]
+    return [r.id, r.customer, r.account, r.rep, r.requester, r.note, r.deliveryReason]
       .some((v) => String(v == null ? '' : v).toLowerCase().includes(f.q));
   }
 
@@ -1041,16 +1101,27 @@
     const list = filteredRequests();
     const pending = state.requests.filter((r) => r.status === 'قيد الاعتماد');
     const pendingTotal = pending.reduce((s, r) => s + Number(r.amount), 0);
-    $('requestsCount').innerHTML = `<span class="chip">${money(list.length)} طلب</span><span class="chip warn">قيد الاعتماد ${money(pending.length)} · ${money(pendingTotal)}</span>`;
+    const undelivered = state.requests.filter((r) => deliveryApplies(r) && r.deliveryStatus !== DELIVERY.delivered);
+    const late = undelivered.filter((r) => deliveryLate(r) > 0);
+    const oldest = undelivered.reduce((m, r) => {
+      const since = String(r.decidedAt || r.createdAt || '').slice(0, 10);
+      return Math.max(m, since ? Math.max(0, dayDiff(todayStr(), since)) : 0);
+    }, 0);
+    $('requestsCount').innerHTML = `<span class="chip">${money(list.length)} طلب</span>`
+      + `<span class="chip warn">قيد الاعتماد ${money(pending.length)} · ${money(pendingTotal)}</span>`
+      + `<span class="chip">قيد التسليم ${money(undelivered.length)}</span>`
+      + (late.length ? `<span class="chip stop">متأخر ${money(late.length)}</span>` : '')
+      + (oldest ? `<span class="chip">أقدم غير مسلّم ${oldest} يوم</span>` : '');
     const shown = list.slice(0, state.requestShown);
     $('requestsMore').hidden = shown.length >= list.length;
     if (!list.length) {
-      $('requestRows').innerHTML = '<tr><td colspan="7" class="empty">لا توجد طلبات مطابقة.</td></tr>';
+      $('requestRows').innerHTML = '<tr><td colspan="8" class="empty">لا توجد طلبات مطابقة.</td></tr>';
       return;
     }
     const own = (r) => state.user && String(r.requesterUser).toLowerCase() === state.user.username;
     $('requestRows').innerHTML = shown.map((r) => {
       const act = canDecide() && r.status === 'قيد الاعتماد' && (isAdmin() || !own(r));
+      const editDelivery = canDeliver() && deliveryApplies(r);
       return `
       <tr tabindex="0" data-review="${esc(r.id)}">
         <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
@@ -1062,16 +1133,23 @@
           ${r.approver ? `<span class="sub">${esc(r.approver)} · ${esc(r.decidedAt)}</span>` : ''}
           ${r.verdictAtDecision ? `<span class="sub">عند القرار: ${esc(r.verdictAtDecision)}</span>` : ''}
           ${r.decisionNote ? `<span class="sub">${esc(r.decisionNote)}</span>` : ''}</td>
-        <td><button type="button" class="ghost" data-review="${esc(r.id)}">${act ? 'مراجعة' : 'عرض'}</button></td>
+        <td>${deliveryApplies(r) ? deliveryChip(r) : '<span class="sub">—</span>'}
+          ${r.deliveryDue ? `<span class="sub">الموعد: ${esc(r.deliveryDue)}</span>` : ''}
+          ${r.deliveryAt ? `<span class="sub">سُلّم: ${esc(r.deliveryAt)}</span>` : ''}
+          ${r.deliveryReason ? `<span class="sub">${esc(r.deliveryReason)}</span>` : ''}</td>
+        <td><button type="button" class="ghost" data-review="${esc(r.id)}">${act ? 'مراجعة' : editDelivery ? 'تسليم' : 'عرض'}</button></td>
       </tr>`;
     }).join('');
   }
 
   function exportRequests() {
-    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة', 'الفحص', 'الأسباب', 'الحالة', 'مقدم الطلب', 'تاريخ الطلب', 'المعتمد', 'تاريخ الاعتماد', 'ملاحظات القرار', 'ملاحظة الطلب'];
+    const header = ['الطلب', 'العميل', 'الكود', 'المندوب', 'القيمة', 'الفحص', 'الأسباب', 'الحالة', 'مقدم الطلب', 'تاريخ الطلب',
+      'المعتمد', 'تاريخ الاعتماد', 'ملاحظات القرار', 'ملاحظة الطلب',
+      'حالة التسليم', 'موعد التسليم', 'تاريخ التسليم', 'تأخير التسليم (يوم)', 'سبب التأخير', 'ملاحظات التسليم'];
     const rows = filteredRequests().map((r) => [
       r.id, r.customer, r.account, r.rep, Math.round(Number(r.amount) || 0), r.verdict, r.reasons || '',
       r.status, r.requester, r.createdAt, r.approver || '', r.decidedAt || '', r.decisionNote || '', r.note || '',
+      r.deliveryStatus || '', r.deliveryDue || '', r.deliveryAt || '', deliveryLate(r) || '', r.deliveryReason || '', r.deliveryNote || '',
     ]);
     downloadCsv(`الطلبات-${new Date().toISOString().slice(0, 10)}.csv`, header, rows);
   }
@@ -1209,6 +1287,22 @@
           ${reviewFact('الفحص عند القرار', r.verdictAtDecision)}
         </dl>
         ${r.decisionNote ? `<div class="review-note"><strong>ملاحظة القرار</strong>${esc(r.decisionNote)}</div>` : ''}`;
+    const delivery = deliveryApplies(r)
+      ? `<section class="review-block full">
+          <h3>التسليم</h3>
+          <dl>
+            <dt>الحالة</dt><dd>${deliveryChip(r)}</dd>
+            ${reviewFact('موعد التسليم المخطط', r.deliveryDue)}
+            ${reviewFact('تاريخ التسليم الفعلي', r.deliveryAt)}
+            ${reviewFact('سبب التأخير', r.deliveryReason)}
+          </dl>
+          ${r.deliveryNote ? `<div class="review-note"><strong>ملاحظات التسليم</strong>${esc(r.deliveryNote)}</div>` : ''}
+          ${r.deliveryBy ? `<div class="review-note"><strong>آخر تحديث للتسليم</strong>${esc(r.deliveryBy)} · ${esc(r.deliveryUpdatedAt || '')}</div>` : ''}
+        </section>`
+      : `<section class="review-block full">
+          <h3>التسليم</h3>
+          <p class="sub">${r.status === 'مرفوض' ? 'لا ينطبق: الطلب مرفوض.' : 'يبدأ التسليم بعد اعتماد الطلب.'}</p>
+        </section>`;
     return `
       ${notice ? `<div class="review-notice">${esc(notice)}</div>` : ''}
       <section class="review-block">
@@ -1244,10 +1338,27 @@
         </dl>
         <div class="review-note"><strong>أسباب الفحص</strong>${r.reasons ? esc(r.reasons) : 'لا توجد ملاحظات.'}</div>
       </section>
+      ${delivery}
       <section class="review-block full">
         <h3>القرار</h3>
         ${decision}
       </section>`;
+  }
+
+  function fillDeliveryForm(r) {
+    $('deliveryStatus').value = r.deliveryStatus || '';
+    $('deliveryDue').value = r.deliveryDue || '';
+    $('deliveryAt').value = r.deliveryAt || '';
+    $('deliveryReason').value = r.deliveryReason || '';
+    $('deliveryNote').value = r.deliveryNote || '';
+    $('deliveryError').hidden = true;
+    $('deliveryMsg').textContent = '';
+  }
+
+  function deliveryError(text) {
+    $('deliveryMsg').textContent = '';
+    $('deliveryError').textContent = text;
+    $('deliveryError').hidden = false;
   }
 
   async function openRequest(id) {
@@ -1270,6 +1381,9 @@
     $('approve').hidden = !state.decisionCanAct;
     $('reject').hidden = !state.decisionCanAct;
     $('approve').disabled = $('reject').disabled = true;
+    const editDelivery = canDeliver() && deliveryApplies(r);
+    $('deliverySection').hidden = !editDelivery;
+    if (editDelivery) fillDeliveryForm(r);
     $('decision').showModal();
     $('decision').scrollTop = 0;
     if (!state.decisionCanAct) {
@@ -1287,6 +1401,42 @@
     if (preview) $('approve').disabled = $('reject').disabled = false;
     setBusy(preview ? 'يتم تحديث الموقف في الخلفية…' : 'جارٍ التحقق من الطلب بالبيانات الحالية…');
     await loadDecisionCheck(r);
+  }
+
+  async function saveDelivery() {
+    const r = state.deciding;
+    if (!r) return;
+    const status = $('deliveryStatus').value;
+    const reason = $('deliveryReason').value;
+    if (status === DELIVERY.failed && !reason) {
+      deliveryError('اختر سبب تعذر التسليم.');
+      return;
+    }
+    // Delivered without a date means today; the server applies the same rule.
+    if (status === DELIVERY.delivered && !$('deliveryAt').value) $('deliveryAt').value = todayStr();
+    $('deliverySave').disabled = true;
+    $('deliveryError').hidden = true;
+    $('deliveryMsg').textContent = 'جارٍ حفظ حالة التسليم…';
+    try {
+      const data = await callScript('deliver', {
+        id: r.id, status,
+        due: $('deliveryDue').value,
+        at: $('deliveryAt').value,
+        reason, note: $('deliveryNote').value,
+      });
+      const updated = data.request;
+      state.requests = state.requests.map((x) => (x.id === updated.id ? updated : x));
+      state.deciding = updated;
+      $('decisionDetails').innerHTML = reviewDetailsHtml(updated);
+      fillDeliveryForm(updated);
+      $('deliveryMsg').textContent = 'تم حفظ حالة التسليم.';
+      renderRequests();
+      if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
+    } catch (e) {
+      deliveryError(e.message);
+    } finally {
+      $('deliverySave').disabled = false;
+    }
   }
 
   async function loadDecisionCheck(r) {
@@ -1530,7 +1680,7 @@
   $('logout').addEventListener('click', logout);
   $('demo').addEventListener('click', loadDemo);
   $('reload').addEventListener('click', () => (state.isDemo ? loadDemo() : loadData()));
-  for (const id of ['requestStatus', 'requestFrom', 'requestTo', 'requestQuery']) {
+  for (const id of ['requestStatus', 'requestDelivery', 'requestLate', 'requestFrom', 'requestTo', 'requestQuery']) {
     $(id).addEventListener(id === 'requestQuery' ? 'input' : 'change', () => {
       state.requestShown = REQUEST_PAGE;
       renderRequests();
@@ -1598,6 +1748,12 @@
   $('reject').addEventListener('click', () => decide('reject'));
   $('decisionRetry').addEventListener('click', () => { if (state.deciding && state.decisionCanAct) loadDecisionCheck(state.deciding); });
   $('decisionClose').addEventListener('click', () => $('decision').close());
+  $('deliverySave').addEventListener('click', saveDelivery);
+  $('deliveryStatus').addEventListener('change', () => {
+    if ($('deliveryStatus').value === DELIVERY.delivered && !$('deliveryAt').value) {
+      $('deliveryAt').value = todayStr();
+    }
+  });
   $('decisionDetails').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-account]');
     if (!b) return;
@@ -1607,6 +1763,7 @@
   });
   $('decision').addEventListener('close', () => {
     setBusy('');
+    $('deliverySection').hidden = true;
     state.deciding = null;
     state.decisionPending = false;
     state.decisionPreview = false;
