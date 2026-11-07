@@ -2158,6 +2158,7 @@
     $('approve').hidden = !state.decisionCanAct;
     $('reject').hidden = !state.decisionCanAct;
     $('decisionEdit').hidden = !canEditRequest(r);
+    $('decisionPromise').hidden = !canCollect();
     $('approve').disabled = $('reject').disabled = true;
     const editDelivery = canDeliver() && deliveryApplies(r);
     $('deliverySection').hidden = !editDelivery;
@@ -2627,6 +2628,15 @@
     const row = e.target.closest('tr[data-promise-edit]');
     if (row && e.target === row) openPromise(null, row.dataset.promiseEdit);
   });
+  // The promise is usually born with the order, so the order carries the way in.
+  $('decisionPromise').addEventListener('click', () => {
+    const r = state.deciding;
+    if (!r || !canCollect()) return;
+    $('decision').close();
+    openPromise(r.account);
+    $('promiseRequest').value = r.id;
+  });
+
   $('promiseSave').addEventListener('click', savePromiseForm);
   $('promiseCancel').addEventListener('click', () => $('promiseDialog').close());
   $('promiseAccount').addEventListener('input', () => {
