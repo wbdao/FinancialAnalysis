@@ -967,7 +967,7 @@ function slimCustomer_(c) {
   };
 }
 
-function evaluate_(who, account, amount) {
+function evaluate_(who, account, amount, advancePayment) {
   const rules = rules_();
   const cache = CacheService.getScriptCache();
   // The scope and rules are part of the key, so two users never share a
@@ -997,6 +997,8 @@ function evaluate_(who, account, amount) {
     try { cache.put(key, JSON.stringify({ c: slimCustomer_(c), day: analysisDay }), EVAL_TTL); } catch (e) { /* the cache is optional */ }
   }
   const result = Engine.evaluateNew(c, amount, rules);
+  // Apply down payment business rules
+  const verdict = applyDownPaymentRules_(result, c, advancePayment);
   const reasons = Object.keys(result.checks)
     .map(function (k) { return result.checks[k]; })
     .filter(function (x) { return x.level !== 'ok'; })
@@ -1009,8 +1011,34 @@ function evaluate_(who, account, amount) {
     checksOpen: c.checksOpen, checksDue: c.checksDue, checksRejected: c.checksRejected, exposureAfter: result.exposureAfter,
     dataDate: Utilities.formatDate(new Date(analysisDay * 86400000), 'UTC', 'yyyy-MM-dd'),
     dataAt: meta ? meta.builtAt : 0,
-    verdict: result.verdict, verdictLabel: VERDICTS[result.verdict], reasons: reasons,
+    verdict: verdict, verdictLabel: VERDICTS[verdict], reasons: reasons,
   };
+}
+
+function applyDownPaymentRules_(result, customer, advancePayment) {
+  let verdict = result.verdict;
+  const { creditLimit, balance, guarantee, overdue } = customer;
+  // Calculate the risk gap: credit limit excess + overdue amount
+  const creditExcess = Math.max(0, (balance || 0) - creditLimit);
+  const riskGap = creditExcess + (overdue || 0);
+  // If advance payment is provided, apply business rules
+  if (advancePayment !== '' && advancePayment != null) {
+    const advance = Number(advancePayment);
+    // Rule 1: Down payment covers risk gap + has guarantee → auto-approved
+    if (advance >= riskGap && guarantee > 0) {
+      verdict = 'ok';
+    }
+    // Rule 2: Down payment covers risk gap but no guarantee → needs approval
+    else if (advance >= riskGap && guarantee === 0) {
+      verdict = 'warn';
+    }
+  }
+  // Rule 3: Customer has no overdue AND no guarantee → needs approval
+  // Unless already auto-approved by Rule 1 (down payment + guarantee)
+  if (overdue === 0 && guarantee === 0 && verdict !== 'ok') {
+    verdict = 'warn';
+  }
+  return verdict;
 }
 
 /* ---- requests ---- */
@@ -1027,7 +1055,7 @@ function add_(req, who) {
   if (advance !== '' && advance > amount) throw new Error('الدفعة المقدمة لا تزيد عن قيمة الفاتورة.');
   if (weekly !== '' && weekly > amount) throw new Error('الدفعة الأسبوعية لا تزيد عن قيمة الفاتورة.');
   // Reading the customer sheets is slow, so it stays outside the lock.
-  const check = evaluate_(who, account, amount);
+  const check = evaluate_(who, account, amount, advance);
   return locked_(function () {
     const sh = requestsSheet_();
     const all = readAll_(sh);
@@ -1093,7 +1121,7 @@ function edit_(req, who) {
   if (advance !== '' && advance > amount) throw new Error('الدفعة المقدمة لا تزيد عن قيمة الفاتورة.');
   if (weekly !== '' && weekly > amount) throw new Error('الدفعة الأسبوعية لا تزيد عن قيمة الفاتورة.');
   // The check always follows the amount, so the approver sees the new figure.
-  const check = evaluate_(who, account, amount);
+  const check = evaluate_(who, account, amount, advance);
   return locked_(function () {
     const sh = requestsSheet_();
     const headers = headers_(sh);
