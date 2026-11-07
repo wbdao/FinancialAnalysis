@@ -15,10 +15,23 @@
     overLimit: 'stop',  // a new invoice above the credit limit: 'stop' or 'warn'
     stopDays: 90,       // arrears older than this stop the customer
     tolerance: 1000,    // arrears below this amount are ignored
+    // A schedule code the engine does not know must not become "due today":
+    // that makes every invoice of the customer overdue. It falls back to this.
+    defaultTermDays: 30,
   };
   const AGING_BUCKETS = ['غير مستحق', 'متأخر 1-30', 'متأخر 31-60', 'متأخر 61-90', 'متأخر 91-180', 'متأخر +180'];
   const SEVERITY = { ok: 0, warn: 1, stop: 2 };
   const PAID_BELOW = 0.5;  // a smaller remainder is rounding, not debt
+
+  // Payment and return rows are credits even when the sheet stores the amount
+  // positive, because some exports keep every amount positive and put the
+  // direction in Transaction type. The voucher is a fallback for blank types.
+  const CREDIT_KINDS = ['payment', 'return', 'credit note', 'دفع', 'سداد', 'تحصيل', 'قبض', 'مرتجع', 'إشعار دائن', 'اشعار دائن'];
+  const CREDIT_VOUCHERS = ['cust', 'chec'];
+  const isCreditKind = (kind) => {
+    const k = str(kind).toLowerCase();
+    return CREDIT_KINDS.some((word) => k.includes(word));
+  };
 
   const BASE_COLS = {
     account: ['Account'], name: ['Name'], warehouse: ['Warehouse Group'], group: ['Customer group'],
@@ -31,9 +44,10 @@
   };
   const REQUIRED = { base: ['account', 'name', 'creditLimit'], tx: ['account', 'kind', 'date', 'amount'] };
 
-  // The checks sheet, read as CSAccounts reads it. A received check is booked as
-  // a payment at once, so an open check is debt the balance no longer shows.
-  // Main tab: these statuses are settled, any other is open. Warehouse tab: only mm = "NN" is open.
+  // The checks sheet, read as CSAccounts reads it. It is a record of collection
+  // risk: the balance comes from the movements alone, so an open check is never
+  // added to it. Main tab: these statuses are settled, any other is open.
+  // Warehouse tab: only mm = "NN" is open.
   const CHECK_SETTLED = ['خالص', 'متابعة حساب', 'غير تابع'];
   const CHECK_REJECTED = 'تم الرفض';
   const CHECK_COLS = {
@@ -80,6 +94,31 @@
     if (/aow/i.test(c)) return 30;
     if (/cash/i.test(c)) return 1;
     return 0; // Stop and unknown codes: due immediately
+  }
+
+  /**
+   * termIsUnknown - a schedule code is filled but not understood. Stop and
+   * blank codes are known: Stop is a decision, blank means due on issue.
+   */
+  function termIsUnknown(code) {
+    const c = str(code);
+    if (!c || /stop|ايقاف|إيقاف/i.test(c)) return false;
+    return termDays(c) <= 0;
+  }
+
+  /**
+   * planKey - the plan name as matched: case, spaces, % and hamza/ta-marbuta
+   * forms are ignored, so "25% Sch_8W" and "25%Sch_8W" are the same plan.
+   * A name that misses here silently falls back to the old term code, which is
+   * exactly how a due date ends up computed the old way.
+   */
+  function planKey(name) {
+    return str(name).toLowerCase()
+      .replace(/[أإآ]/g, 'ا')
+      .replace(/ة/g, 'ه')
+      .replace(/ى/g, 'ي')
+      .replace(/[%٪]/g, '')
+      .replace(/[\s_\-()]+/g, '');
   }
 
   function bucketOf(overdueDays) {
@@ -161,20 +200,28 @@
     const planMap = {};
     for (let i = 0; i < plans.length; i++) {
       const p = plans[i] || {};
-      const key = str(p.name || p.method || p.paymentMethod || p.planName || p['طريقة السداد']).toLowerCase();
+      const key = planKey(p.name || p.method || p.paymentMethod || p.planName || p['طريقة السداد']);
       if (key) planMap[key] = p;
     }
     function planDaysFor(code, method) {
-      const m = str(method).toLowerCase();
-      if (m && planMap[m]) {
-        const pm = planMap[m];
-        const cnt = num(pm.count || pm.installments || pm.numPayments || pm['عدد الفعات'] || pm['عدد الدعات']);
-        const dper = num(pm.daysPerInstallment || pm.days || pm.periodDays || pm['عدد الايام لكل دعه'] || pm['عدد الأيام لكل دعة']);
+      const pm = planMap[planKey(method)];
+      if (pm) {
+        const cnt = num(pm.count || pm.installments || pm.numPayments || pm['عدد الفعات'] || pm['عدد الدفعات'] || pm['عدد الدعات']);
+        const dper = num(pm.daysPerInstallment || pm.days || pm.periodDays || pm['عدد الايام لكل دفعه'] || pm['عدد الأيام لكل دفعة']);
+        // The plan is "how many payments" x "days between them"; a sheet that
+        // only states the total weeks still gives a due period.
         if (dper > 0 && cnt > 0) return Math.round(dper * cnt);
         if (dper > 0) return Math.round(dper);
-        if (cnt > 0 && dper > 0) return Math.round(cnt * dper);
+        const weeks = num(pm.weeks || pm.weekNum || pm['عدد الأسابيع'] || pm['الأسابيع']);
+        if (weeks > 0) return Math.round(weeks * 7);
       }
-      return termDays(code);
+      const days = termDays(code);
+      if (days > 0) return days;
+      if (termIsUnknown(code)) {
+        issues.unknownTerms++;
+        return Math.max(0, num(rules.defaultTermDays));
+      }
+      return 0;
     }
     const ti = mapHeader(txRows[0] || [], TX_COLS, REQUIRED.tx, 'حركات العملاء');
     const pick = (row, i) => (i >= 0 ? row[i] : '');
@@ -182,6 +229,9 @@
       badDates: 0, zeroRows: 0, futureRows: 0, notInBase: 0, blankGuarantee: 0, balanceDiffs: 0,
       // Optional for the analysis, but their absence leaves empty cells in the requests sheet.
       missingColumns: ['idNumber', 'warehouse', 'group'].filter((key) => bi[key] < 0).map((key) => BASE_COLS[key][0]),
+      // Customers whose schedule code (and payment method) gave no plan: their
+      // due date comes from the default term, so the screen must say so.
+      unknownTerms: 0,
     };
 
     // ---- movements ----------------------------------------------------------
@@ -194,9 +244,16 @@
       if (!account) continue;
       const day = row[ti.date];
       if (typeof day !== 'number' || !isFinite(day)) { issues.badDates++; continue; }
+      const kind = str(row[ti.kind]);
+      const voucher = str(pick(row, ti.voucher));
+      const raw = num(row[ti.amount]);
+      // A sales row keeps its sign: a negative sales row is a credit note.
+      // Every other row with a credit voucher/type is a payment, not an invoice.
+      const isCredit = isCreditKind(kind)
+        || (!/sales|بيع|مبيعات/i.test(kind) && CREDIT_VOUCHERS.indexOf(voucher.toLowerCase()) >= 0);
       const t = {
-        account, day: Math.floor(day), amount: num(row[ti.amount]), kind: str(row[ti.kind]),
-        voucher: str(pick(row, ti.voucher)), invoice: str(pick(row, ti.invoice)), description: str(pick(row, ti.description)),
+        account, day: Math.floor(day), amount: isCredit ? -Math.abs(raw) : raw, kind,
+        voucher, invoice: str(pick(row, ti.invoice)), description: str(pick(row, ti.description)),
       };
       if (t.invoice === '0') t.invoice = '';
       if (t.amount === 0) { issues.zeroRows++; continue; }
@@ -249,7 +306,7 @@
       add({ account, name: account, warehouse: '', group: '', creditLimit: 0, guarantee: 0, baseBalance: null, terms: '', paymentMethod: '', rep: 'بدون مندوب', idNumber: '', inBase: false });
     }
     issues.balanceDiffs = customers.filter((c) => c.baseBalance != null && Math.abs(c.baseBalance - c.balance) >= 1).length;
-    // Open checks of accounts unknown to the customer base add to nobody's exposure.
+    // Open checks of accounts unknown to the customer base are shown to nobody.
     issues.checksUnmatched = [...checksByAccount.keys()].filter((a) => !seen.has(a) && checksByAccount.get(a).some((k) => k.open)).length;
 
     const invoices = customers.flatMap((c) => c.invoices);
@@ -306,7 +363,9 @@
       inv.covered = Math.min(guaranteeLeft, inv.remaining);
       guaranteeLeft -= inv.covered;
     }
-    // Exposure: the balance plus the open checks it no longer shows.
+    // The checks sheet is a separate record: an open check is a collection risk
+    // shown on its own, not a debt. Only the movements settle the invoices, so
+    // the exposure is the balance and never adds the open checks again.
     c.checksOpen = 0;
     c.checksOpenCount = 0;
     c.checksDue = 0;
@@ -322,7 +381,7 @@
       else if (k.due != null && k.due <= analysisDay) { c.checksDue += k.net; c.checksDueCount++; }
       else if (k.due != null && (c.checksNextDue == null || k.due < c.checksNextDue)) c.checksNextDue = k.due;
     }
-    c.exposure = c.balance + c.checksOpen;
+    c.exposure = c.balance;
     c.uncovered = c.exposure > 0 ? Math.max(0, c.exposure - c.guarantee) : 0;
     c.availableCredit = c.creditLimit > 0 ? Math.max(0, c.creditLimit - c.exposure) : 0;
     c.overLimit = c.creditLimit > 0 ? Math.max(0, c.exposure - c.creditLimit) : 0;
@@ -374,7 +433,8 @@
   function evaluateNew(c, amount, rules) {
     const r = Object.assign({}, DEFAULT_RULES, rules);
     const balanceAfter = c.balance + amount;
-    // Credit and guarantee are measured on the exposure, open checks included.
+    // Credit and guarantee are measured on the movements balance. Open checks
+    // stay in the checks centre and are never added here.
     const exposureAfter = (c.exposure != null ? c.exposure : c.balance) + amount;
     const uncovered = exposureAfter > 0 ? Math.max(0, exposureAfter - c.guarantee) : 0;
     const overdueUncovered = Math.max(0, c.overdue - c.guarantee);
@@ -493,7 +553,7 @@
   }
 
   const Engine = {
-    analyze, evaluateNew, lastMovementDay, parseChecks, termDays, bucketOf, dayOf,
+    analyze, evaluateNew, lastMovementDay, parseChecks, termDays, termIsUnknown, planKey, bucketOf, dayOf,
     DEFAULT_RULES, AGING_BUCKETS, BASE_COLS, TX_COLS, CHECK_COLS,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = Engine;

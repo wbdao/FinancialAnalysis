@@ -42,7 +42,7 @@ const PLANS_TAB = 'طرق السداد';
 const PLANS_FALLBACK_TAB = 'PaymantSchedual';
 const PLANS_SHEET_ID = '';
 
-const BUILD = '2026-11-06-a17';
+const BUILD = '2026-11-06-a19';
 const UNSET_PASSWORD = 'غيّر-هذه-الكلمة';
 const SHEET_NAME = 'طلبات الفواتير';
 const USERS_SHEET = 'المستخدمين';
@@ -153,6 +153,11 @@ const COLUMNS = {
   actualBy: 'محدّث القيمة الفعلية',
   actualAt: 'وقت تحديث القيمة الفعلية',
 };
+// Reverse lookup built once: rowToObject_ runs for every cell of every row.
+const FIELD_BY_HEADER = Object.keys(COLUMNS).reduce(function (map, f) {
+  map[COLUMNS[f]] = f;
+  return map;
+}, Object.create(null));
 const USER_COLUMNS = {
   username: 'اسم المستخدم', name: 'الاسم', role: 'الصلاحية', active: 'مفعّل',
   warehouses: 'المخازن', hash: 'كلمة السر (مشفرة)', salt: 'Salt',
@@ -1555,15 +1560,17 @@ function headers_(sh) {
 }
 
 function fieldOf_(header) {
-  return Object.keys(COLUMNS).filter(function (f) { return COLUMNS[f] === header; })[0];
+  return FIELD_BY_HEADER[header] || '';
 }
 
 function rowToObject_(headers, values) {
   const out = {};
-  headers.forEach(function (h, i) {
-    const f = fieldOf_(h);
-    if (f) out[f] = isDate_(values[i]) ? formatDate_(values[i]) : values[i];
-  });
+  for (let i = 0; i < headers.length; i++) {
+    const f = FIELD_BY_HEADER[headers[i]];
+    if (!f) continue;
+    const v = values[i];
+    out[f] = isDate_(v) ? formatDate_(v) : v;
+  }
   return out;
 }
 

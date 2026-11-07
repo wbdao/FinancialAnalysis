@@ -79,9 +79,13 @@
   };
 
   const $ = (id) => document.getElementById(id);
-  const money = (v) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(v);
+  // One formatter for the whole session: constructing Intl.NumberFormat per call
+  // is expensive, and the tables call money() thousands of times per render.
+  const FMT0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+  const FMT2 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
+  const money = (v) => FMT0.format(v);
   // Actual invoice values keep their cents; whole amounts still print without .00.
-  const money2 = (v) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v);
+  const money2 = (v) => FMT2.format(v);
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const dateOf = (day) => (day == null ? '—' : new Date(day * 86400000).toISOString().slice(0, 10));
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -94,7 +98,7 @@
     checkList: null, checkShown: CHECK_PAGE, customerAccount: null, customerFrom: 'invoices', requestsLoaded: false,
     requestsLoading: false, requestsError: '',
     promises: [], promisesLoaded: false, promisesLoading: false, promisesError: '', promiseEditing: null,
-    plans: [], plansLoaded: false, editing: null,
+    plans: [], plansLoaded: false, plansPromise: null, plansError: '', editing: null,
   };
 
   /* ---- the script ------------------------------------------------------------ */
@@ -249,7 +253,7 @@
     return `تُعرض نسخة محفوظة من البيانات بتاريخ ${when}. اضغط «تحديث البيانات» لجلب الأحدث.`;
   }
 
-  function applyCache(snap, user) {
+  async function applyCache(snap, user) {
     state.isDemo = false;
     setUser(user || snap.user);
     state.build = snap.build || state.build;
@@ -260,6 +264,7 @@
     };
     state.rules = Object.assign({}, Engine.DEFAULT_RULES, snap.rules || {});
     state.cacheSavedAt = snap.savedAt || 0;
+    await loadPlans();
     recompute();
     show('dashboard');
   }
@@ -367,22 +372,35 @@
       .map((p) => `<option value="${esc(p.name)}"></option>`).join('');
   }
 
-  async function loadPlans() {
-    if (state.plansLoaded) return;
-    state.plansLoaded = true;
-    if (state.isDemo) {
-      state.plans = DEMO_PLANS;
+  /**
+   * loadPlans - the «طرق السداد» reference. It must be in hand before the first
+   * analysis: without it the engine falls back to the old term code and the due
+   * dates look wrong. Callers await this, and every waiter shares one request.
+   */
+  function loadPlans() {
+    if (state.plansLoaded) return Promise.resolve();
+    if (state.plansPromise) return state.plansPromise;
+    state.plansPromise = (async () => {
+      if (state.isDemo) {
+        state.plans = DEMO_PLANS;
+        state.plansLoaded = true;
+        state.plansError = '';
+        fillPlanList();
+        return;
+      }
+      try {
+        const data = await callScript('plans');
+        state.plans = Array.isArray(data.plans) ? data.plans : [];
+        state.plansLoaded = true;
+        state.plansError = '';
+      } catch (e) {
+        // Left unloaded on purpose, so the next open or reload tries again.
+        state.plans = [];
+        state.plansError = `تعذّر قراءة شيت طرق السداد، فحُسبت مدة السداد من عمود Payment schedule وحده. (${e.message})`;
+      }
       fillPlanList();
-      return;
-    }
-    try {
-      const data = await callScript('plans');
-      state.plans = Array.isArray(data.plans) ? data.plans : [];
-    } catch (e) {
-      // An older server has no plans action; the fields stay manual.
-      state.plans = [];
-    }
-    fillPlanList();
+    })().finally(() => { state.plansPromise = null; });
+    return state.plansPromise;
   }
 
   function planByName(name) {
@@ -514,6 +532,8 @@
     if (issues.blankGuarantee) parts.push(`${issues.blankGuarantee} عميل خانة ضمانه فارغة`);
     if (issues.balanceDiffs) parts.push(`${issues.balanceDiffs} عميل رصيده المحسوب من الحركات يختلف عن رصيد القاعدة`);
     if (issues.checksUnmatched) parts.push(`${issues.checksUnmatched} حساب له شيكات مفتوحة وغير موجود في قاعدة العملاء`);
+    if (issues.unknownTerms) parts.push(`${issues.unknownTerms} عميل رمز جدولته غير معروف ولم يوجد له سطر في شيت طرق السداد، فحُسبت مدة السداد ${money(state.rules.defaultTermDays || Engine.DEFAULT_RULES.defaultTermDays)} يومًا`);
+    if (state.plansError) parts.push(state.plansError);
     if (state.sheets.checksError) parts.push(`الشيكات غير محسوبة: ${state.sheets.checksError}`);
     return parts.length ? `مراجعة البيانات: ${parts.join('، ')}.` : '';
   }
@@ -521,6 +541,9 @@
   function recompute() {
     const { base, tx, analysisDay, checks } = state.sheets;
     state.result = Engine.analyze(base, tx, state.rules, analysisDay, checks, state.plans || []);
+    // Sort the invoices once here, so filtering a keystroke does not sort again.
+    const order = { stop: 0, warn: 1, ok: 2, paid: 3 };
+    state.result.invoices.sort((a, b) => order[a.verdict] - order[b.verdict] || b.overdueDays - a.overdueDays || b.remaining - a.remaining);
     state.result.invoices.forEach((inv, key) => { inv.key = key; });
     state.checkList = readChecks();
     const prepared = state.sheets.dataAt ? ` · البيانات من ${timeOf(state.sheets.dataAt)}` : '';
@@ -533,6 +556,7 @@
     fillPromiseCustomerList();
     fillRulesForm();
     state.shown = PAGE_SIZE;
+    renderKpis();
     renderInvoices();
     if (document.body.dataset.view === 'dashboard') renderDashboard();
     if (document.body.dataset.view === 'promises') renderPromises();
@@ -553,6 +577,8 @@
       state.build = data.build || state.build;
       state.cacheSavedAt = null;
       console.info('data read', data.stats);
+      // The due dates depend on the plans, so the first analysis never runs without them.
+      await loadPlans();
       recompute();
       show('dashboard');
       if (!state.isDemo) { loadRequests(); loadPromises(); }
@@ -579,7 +605,7 @@
     } catch (e) {
       if (!state.token) return;  // the session ended; signedOut already ran
       if (cached) {
-        applyCache(cached, null);
+        await applyCache(cached, null);
         banner(`تعذّر التحقق من الجلسة: ${e.message} ${cacheNote()}`, true);
       } else if (/تعذّر الوصول/.test(e.message)) {
         banner(e.message, true);
@@ -592,7 +618,7 @@
     if (cached.build && ping.build && cached.build !== ping.build) { await loadData(); return; }
     if (scopeOf(cached.user) !== scopeOf(ping.user)) { await loadData(); return; }
     if (ruleKey(cached.rules) !== ruleKey(ping.rules)) { await loadData(); return; }
-    applyCache(cached, ping.user);
+    await applyCache(cached, ping.user);
     if (Date.now() - cached.savedAt >= CACHE_TTL) await loadData();
   }
 
@@ -767,7 +793,8 @@
     const q = $('q').value.trim().toLowerCase();
     const verdict = $('verdict').value;
     const rep = $('rep').value;
-    const order = { stop: 0, warn: 1, ok: 2, paid: 3 };
+    // state.result.invoices is already sorted once in recompute, so filtering keeps
+    // the order and a keystroke never re-sorts the whole list.
     return state.result.invoices
       .filter((i) => {
         if (verdict === 'open' && !i.isOpen) return false;
@@ -775,8 +802,7 @@
         if (rep && i.rep !== rep) return false;
         if (state.bucket != null && i.bucket !== state.bucket) return false;
         return !q || [i.number, i.voucher, i.customer, i.account].some((v) => String(v).toLowerCase().includes(q));
-      })
-      .sort((a, b) => order[a.verdict] - order[b.verdict] || b.overdueDays - a.overdueDays || b.remaining - a.remaining);
+      });
   }
 
   function noteCell(check, extra) {
@@ -787,7 +813,6 @@
   }
 
   function renderInvoices() {
-    renderKpis();
     const list = matchingInvoices();
     state.filtered = list;
     const total = list.reduce((s, i) => s + (i.isOpen ? i.remaining : 0), 0);
@@ -986,11 +1011,11 @@
 
         <section class="card dash-card dash-span-7" aria-labelledby="dashTopTitle">
           <div class="card-head">
-            <div><h2 id="dashTopTitle">أهم العملاء تعرضًا</h2><p>مرتبون بالمتأخرات ثم الرصيد شامل الشيكات.</p></div>
+            <div><h2 id="dashTopTitle">أهم العملاء تعرضًا</h2><p>مرتبون بالمتأخرات ثم الرصيد من الحركات.</p></div>
             <button type="button" class="link-btn" data-dash-action="invoices">كل الفواتير</button>
           </div>
           ${top.length ? `<div class="table-wrap dash-table"><table>
-            <thead><tr><th>العميل</th><th class="n">التعرض</th><th class="n">المتأخرات</th><th class="n">تجاوز الحد</th><th>الحالة</th></tr></thead>
+            <thead><tr><th>العميل</th><th class="n">الرصيد</th><th class="n">المتأخرات</th><th class="n">تجاوز الحد</th><th>الحالة</th></tr></thead>
             <tbody>${top.map((c) => {
               const risk = dashboardRisk(c);
               return `<tr>
@@ -1068,7 +1093,6 @@
       ${row('Warehouse Group', c.warehouse || 'فارغ')}
       ${row('Customer group', c.group || 'فارغ')}
       ${c.hasChecks ? row('شيكات مفتوحة', `${money(c.checksOpen)} (${c.checksOpenCount})`) : ''}
-      ${c.hasChecks ? row('الرصيد شامل الشيكات', money(c.exposure)) : ''}
       ${c.hasChecks ? row('شيكات مستحقة لم تُصرف', c.checksDueCount ? `${money(c.checksDue)} (${c.checksDueCount})` : '—') : ''}
       ${c.hasChecks ? row('شيكات مرفوضة', c.checksRejectedCount ? `${money(c.checksRejected)} (${c.checksRejectedCount})` : '—') : ''}
       ${c.hasChecks && c.checksNextDue != null ? row('أقرب استحقاق شيك', dateOf(c.checksNextDue)) : ''}
@@ -1149,17 +1173,17 @@
     state.lastCheck = { c, r, amount, ref: `R${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` };
     const [title, sub] = NEW_VERDICT[r.verdict];
     const card = (name, check, why) => `<div class="panel"><h3>${name}</h3>${noteCell(check)}<p class="why">${esc(why)}</p></div>`;
-    const afterLabel = c.hasChecks ? 'الرصيد شامل الشيكات بعد الفاتورة' : 'الرصيد بعد الفاتورة';
+    const afterLabel = 'الرصيد بعد الفاتورة';
     const creditWhy = c.stopped ? 'حساب العميل موقوف.'
       : c.creditLimit <= 0 ? 'لا يوجد حد ائتمان مسجل لهذا العميل.'
       : `${afterLabel} ${money(r.exposureAfter)} من حد ${money(c.creditLimit)}. المتاح الآن ${money(r.maxByCredit)}.`;
     const guaranteeWhy = c.guarantee > 0
       ? `الضمان ${money(c.guarantee)}، وغير المغطى بعد الفاتورة ${money(r.uncovered)}.`
       : `لا يوجد ضمان، و${afterLabel} ${money(r.exposureAfter)}.`;
-    const chequesWhy = !c.hasChecks ? 'شيت الشيكات غير مربوط، فالرصيد لا يشمل الشيكات تحت التحصيل.'
+    const chequesWhy = !c.hasChecks ? 'شيت الشيكات غير مربوط، فلا يمكن عرض الشيكات المفتوحة.'
       : c.checksRejectedCount ? `${c.checksRejectedCount} شيك مرفوض بقيمة ${money(c.checksRejected)} لم يُسوَّ بعد.`
       : c.checksDueCount ? `${c.checksDueCount} شيك استحق ولم يُصرف بقيمة ${money(c.checksDue)}.`
-      : c.checksOpenCount ? `${c.checksOpenCount} شيك تحت التحصيل بقيمة ${money(c.checksOpen)}، ومحسوبة في الرصيد.`
+      : c.checksOpenCount ? `${c.checksOpenCount} شيك تحت التحصيل بقيمة ${money(c.checksOpen)}، وهي خارج الرصيد حتى تُحصَّل.`
       : 'لا توجد شيكات مفتوحة على العميل.';
     const arrearsWhy = c.overdue >= 1
       ? `متأخرات ${money(c.overdue)}، وأقدمها متأخر ${c.oldestOverdueDays} يوم. تصبح حرجة بعد ${state.result.rules.stopDays} يوم.`
@@ -1391,8 +1415,8 @@
         </div>
       </section>
       <div class="kpis kpis-4">
-        ${kpiCard('wallet', 'primary', 'الرصيد', money(c.balance), 'بدون الشيكات المفتوحة')}
-        ${kpiCard('check-circle', 'info', 'الرصيد شامل الشيكات', money(c.exposure), `${money(c.checksOpenCount)} شيك مفتوح`)}
+        ${kpiCard('wallet', 'primary', 'الرصيد', money(c.balance), 'من الحركات، بدون الشيكات المفتوحة')}
+        ${kpiCard('check-circle', 'info', 'شيكات مفتوحة', money(c.checksOpen), `${money(c.checksOpenCount)} شيك · خارج الرصيد`)}
         ${kpiCard('shield', c.creditLimit > 0 ? 'ok' : 'warn', 'المتاح من حد الائتمان', c.creditLimit > 0 ? money(c.availableCredit) : 'لا يوجد حد', c.creditLimit > 0 ? `الحد ${money(c.creditLimit)}` : 'حد الائتمان غير مسجل')}
         ${kpiCard('clock', c.overdue > 0 ? 'warn' : 'ok', 'المتأخرات', money(c.overdue), c.oldestOverdueDays ? `أقدمها ${money(c.oldestOverdueDays)} يوم` : 'لا توجد متأخرات')}
       </div>
@@ -1894,7 +1918,7 @@
       : `نسخة البيانات: ${esc(timeOf(dataAt))}${ageMin > 30 ? ' · قد تكون البيانات قديمة، راجعها قبل القرار' : ''} · `;
     return `
       <b>${label}:</b><span class="tag ${check.verdict}">${esc(check.verdictLabel)}</span>
-      <span class="sub">${dataLine}الرصيد شامل الشيكات بعد الفاتورة ${money2(check.exposureAfter)} من حد ${money2(check.creditLimit)} · الضمان ${money2(check.guarantee)} · المتأخرات ${money2(check.overdue)} · شيكات مرفوضة ${money2(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
+      <span class="sub">${dataLine}الرصيد بعد الفاتورة ${money2(check.exposureAfter)} من حد ${money2(check.creditLimit)} · الضمان ${money2(check.guarantee)} · المتأخرات ${money2(check.overdue)} · شيكات مرفوضة ${money2(check.checksRejected)}${check.reasons ? ` · ${esc(check.reasons)}` : ''}</span>`;
   }
 
   function setBusy(text) {
@@ -2019,7 +2043,7 @@
         <dl>
           <dt>النتيجة</dt><dd><span class="tag ${VERDICT_TAG[r.verdict] || 'paid'}">${esc(r.verdict || '—')}</span></dd>
           ${reviewFact('تاريخ البيانات', r.dataDate)}
-          ${reviewNum('الرصيد شامل الشيكات بعد الفاتورة', r.exposureAfter)}
+          ${reviewNum('الرصيد بعد الفاتورة', r.exposureAfter)}
           ${reviewNum('حد الائتمان', r.creditLimit)}
           ${reviewNum('الضمان', r.guarantee)}
           ${reviewNum('المتأخرات', r.overdue)}
@@ -2529,10 +2553,17 @@
   $('logout').addEventListener('click', logout);
   $('demo').addEventListener('click', loadDemo);
   $('reload').addEventListener('click', () => (state.isDemo ? loadDemo() : loadData()));
+  let requestTimer = null;
   for (const id of ['requestStatus', 'requestDelivery', 'requestLate', 'requestActual', 'requestFrom', 'requestTo', 'requestQuery']) {
     $(id).addEventListener(id === 'requestQuery' ? 'input' : 'change', () => {
       state.requestShown = REQUEST_PAGE;
-      renderRequests();
+      // Typing in the search box waits a moment; the list may be large.
+      if (id === 'requestQuery') {
+        clearTimeout(requestTimer);
+        requestTimer = setTimeout(renderRequests, 180);
+      } else {
+        renderRequests();
+      }
     });
   }
   $('requestsMore').addEventListener('click', () => {
@@ -2676,7 +2707,11 @@
   $('passwordForm').addEventListener('submit', changePassword);
   $('rulesForm').addEventListener('submit', saveRules);
   $('snapshotForm').addEventListener('submit', refreshSnapshot);
-  $('q').addEventListener('input', refilter);
+  let invoiceTimer = null;
+  $('q').addEventListener('input', () => {
+    clearTimeout(invoiceTimer);
+    invoiceTimer = setTimeout(refilter, 180);
+  });
   $('verdict').addEventListener('change', refilter);
   $('rep').addEventListener('change', refilter);
   $('export').addEventListener('click', exportCsv);
@@ -2687,6 +2722,8 @@
     if (!b) return;
     const bucket = +b.dataset.bucket;
     state.bucket = state.bucket === bucket ? null : bucket;
+    // Only the pressed state of the chart changed; the KPIs did not.
+    if (state.result) renderAgingChart(state.result.summary);
     refilter();
   });
   $('rows').addEventListener('click', (e) => {
@@ -2717,6 +2754,7 @@
       const b = +bucket.dataset.bucket;
       state.bucket = state.bucket === b ? null : b;
       show('invoices');
+      renderKpis();
       renderInvoices();
       return;
     }
@@ -2733,7 +2771,7 @@
     if (view === 'promises') { show('promises'); ensurePromises(); return; }
     if (view === 'newPromise') { openPromise(); return; }
     if (view === 'loadRequests') { loadRequests(); return; }
-    if (view === 'invoices') { show('invoices'); renderInvoices(); return; }
+    if (view === 'invoices') { show('invoices'); renderKpis(); renderInvoices(); return; }
     show(view);
   });
   $('dashboardBody').addEventListener('keydown', (e) => {

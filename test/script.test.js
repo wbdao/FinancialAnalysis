@@ -544,7 +544,7 @@ test('checks: data carries both tabs, header found under the totals row, extra c
   assert.strictEqual(r.stats.checks, 3);  // two main checks and one warehouse check; the totals row is not a check
   const a = Engine.analyze(r.base, r.tx, r.rules, r.analysisDay, r.checks).customers.find((c) => c.account === 'A1');
   assert.strictEqual(a.checksOpen, 2000);
-  assert.strictEqual(a.exposure, 7000);
+  assert.strictEqual(a.exposure, 5000);
 });
 
 test('checks: a warehouse user receives only the checks of their customers', () => {
@@ -566,7 +566,7 @@ test('checks: a request is checked with them and records their figures', () => {
   assert.strictEqual(b.checksOpen, 800);
   const a = s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request;
   assert.strictEqual(a.checksOpen, 2000);
-  assert.strictEqual(a.exposureAfter, 10000);
+  assert.strictEqual(a.exposureAfter, 8000);
   assert.strictEqual(a.balanceAfter, 8000);
   const header = s.book.getSheetByName(REQUESTS).grid[0];
   assert.ok(header.includes('شيكات مرفوضة') && header.includes('التعرض بعد الفاتورة (شامل الشيكات)'));
