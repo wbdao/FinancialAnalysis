@@ -881,6 +881,14 @@
     const openPromises = promises.filter((p) => p.status === 'قائم');
     const overduePromises = openPromises.filter((p) => p.due && p.due < today);
     const promiseAmount = openPromises.reduce((n, p) => n + (Number(p.amount) || 0), 0);
+    // Orders with at least one open promise, and orders with no promise at all.
+    const orderPromiseMap = {};
+    (state.requests || []).forEach((r) => {
+      const linked = promises.filter((p) => p.requestId === r.id);
+      orderPromiseMap[r.id] = { has: !!linked.length, count: linked.length };
+    });
+    const ordersWithPromise = Object.values(orderPromiseMap).filter((o) => o.has).length;
+    const ordersWithoutPromise = Object.values(orderPromiseMap).filter((o) => !o.has).length;
     const checks = state.checkList || [];
     const rejected = checks.filter((k) => k.open && k.rejected);
     const due = checks.filter((k) => k.open && !k.rejected && k.due != null && k.due <= state.result.analysisDay);
@@ -979,6 +987,11 @@
         <section class="card dash-card dash-span-12" aria-labelledby="dashPromisesTitle">
           <div class="card-head">
             <div><h2 id="dashPromisesTitle">وعود السداد</h2><p>${promiseKnown ? `${money(openPromises.length)} قائم · ${money(overduePromises.length)} متأخر · ${money(promiseAmount)}` : 'متابعة الوعود والتحصيل'}</p></div>
+            ${promiseKnown
+              ? `<div class="dash-hero-stat warn">
+                <span>طلبات بها وعد</span><strong>${money(ordersWithPromise)}</strong><small>${money(ordersWithoutPromise)} أخرى</small>
+              </div>`
+              : ''}
             <div class="actions">
               ${canCollect() ? '<button type="button" class="btn ghost" data-dash-action="newPromise">وعد جديد</button>' : ''}
               <button type="button" class="link-btn" data-dash-action="promises">كل الوعود</button>
