@@ -728,6 +728,9 @@
           <option value="ملغي">ملغي</option>
         </select>
       </label>
+      <label class="field">رقم الطلب (اختياري)
+        <input id="promiseRequest" list="promiseRequestList" placeholder="الطلب الذي يرتبط به الوعد" autocomplete="off" dir="ltr">
+      </label>
     </div>
     <label class="field">ملاحظة
       <textarea id="promiseNote" rows="2" maxlength="300"></textarea>
@@ -739,9 +742,10 @@
     </div>
   </dialog>
   <datalist id="promiseCustomerList"></datalist>
+  <datalist id="promiseRequestList"></datalist>
 
-  <script src="engine.js?v=23"></script>
-  <script src="demo.js?v=23"></script>
-  <script src="app.js?v=23"></script>
+  <script src="engine.js?v=24"></script>
+  <script src="demo.js?v=24"></script>
+  <script src="app.js?v=24"></script>
 </body>
 </html>

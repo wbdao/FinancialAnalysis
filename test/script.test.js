@@ -776,6 +776,33 @@ test('promises: a promise is not written when the audit log cannot be written', 
   assert.strictEqual(s.call(s.admin, 'promises').promises.length, 1);
 });
 
+test('promises: the request link is a label only and cannot cross customers', () => {
+  const s = setup();
+  const request = s.call(s.admin, 'add', { account: 'A1', amount: 3000 }).request;
+  const created = s.call(s.admin, 'savePromise', {
+    account: 'A1', amount: 1000, due: '2026-07-10', requestId: request.id,
+  });
+  assert.ok(created.ok, created.error);
+  const id = created.promise.id;
+  assert.strictEqual(created.promise.requestId, request.id);
+
+  // The link moves neither the order nor the promise figures.
+  const same = s.call(s.admin, 'list').requests.find((r) => r.id === request.id);
+  assert.strictEqual(same.amount, request.amount);
+  assert.strictEqual(same.status, request.status);
+  assert.strictEqual(s.call(s.admin, 'promises').promises[0].amount, 1000);
+
+  // Another customer's order, or an unknown one, is refused.
+  assert.match(s.call(s.admin, 'savePromise', { account: 'B1', amount: 10, due: '2026-07-10', requestId: request.id }).error, /يخص عميلًا آخر/);
+  assert.match(s.call(s.admin, 'savePromise', { account: 'A1', amount: 10, due: '2026-07-10', requestId: 'REQ999999' }).error, /غير موجود/);
+
+  // The link is fixed after creation, even when the payload carries another one.
+  const updated = s.call(s.admin, 'savePromise', { id, amount: 1200, due: '2026-07-11', requestId: '' });
+  assert.ok(updated.ok, updated.error);
+  assert.strictEqual(updated.promise.requestId, request.id);
+  assert.strictEqual(updated.promise.amount, 1200);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`ok   ${name}`); }

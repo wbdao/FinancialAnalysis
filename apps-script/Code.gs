@@ -173,6 +173,7 @@ const PROMISE_STATUS_LIST = [
 const PROMISE_COLUMNS = {
   id: 'رقم الوعد', account: 'كود العميل', customer: 'اسم العميل', warehouse: 'Warehouse Group',
   amount: 'المبلغ الموعود', due: 'تاريخ الوعد', status: 'حالة الوعد', owner: 'المسؤول',
+  requestId: 'رقم الطلب',
   note: 'ملاحظة', createdAt: 'تاريخ الإنشاء', createdBy: 'أنشأه', updatedAt: 'آخر تحديث', updatedBy: 'حدّثه',
 };
 
@@ -1204,6 +1205,21 @@ function nextPromiseId_(all) {
   return PROMISE_ID_PREFIX + String(max + 1).padStart(ID_DIGITS, '0');
 }
 
+/**
+ * promiseRequest_ - checks the request a promise names. The link is a label on
+ * the promise and nothing else: it changes no balance, verdict, delivery status
+ * or promise status, in either direction.
+ */
+function promiseRequest_(who, id, account) {
+  const wanted = text_(id);
+  const found = readAll_(requestsSheet_()).filter(function (r) {
+    return text_(r.id) === wanted && inScope_(who, r.warehouse);
+  })[0];
+  if (!found) throw new Error('الطلب غير موجود أو خارج نطاق مخازنك: ' + wanted);
+  if (text_(found.account) !== text_(account)) throw new Error('الطلب ' + wanted + ' يخص عميلًا آخر، فلا يُربط بهذا الوعد.');
+  return wanted;
+}
+
 function promiseAmount_(v) {
   const s = text_(v).replace(/,/g, '');
   const n = Number(s);
@@ -1243,21 +1259,25 @@ function savePromise_(req, who) {
   if (existing && !inScope_(who, existing.warehouse)) throw new Error('وعد السداد خارج نطاق مخازنك: ' + id);
 
   let account, customer, warehouse;
+  // The request link is set at creation and stays fixed, like the customer.
+  let requestId = '';
   if (existing) {
     account = existing.account;
     customer = existing.customer;
     warehouse = existing.warehouse;
+    requestId = text_(existing.requestId);
   } else {
     const c = promiseCustomer_(who, req.account);
     account = c.account;
     customer = c.name;
     warehouse = c.warehouse;
+    if (text_(req.requestId)) requestId = promiseRequest_(who, req.requestId, account);
   }
   const now = now_();
   const row = {
     id: existing ? existing.id : nextPromiseId_(all),
     account: account, customer: customer, warehouse: warehouse,
-    amount: amount, due: due, status: status,
+    amount: amount, due: due, status: status, requestId: requestId,
     owner: existing ? existing.owner : publicName_(who),
     note: note,
     createdAt: existing ? existing.createdAt : now,

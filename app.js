@@ -661,6 +661,7 @@
       document.title = `${meta[0]} · موقف الفواتير`;
     }
     if (view === 'dashboard') { renderDashboard(); ensureRequests(); ensurePromises(); }
+    if (view === 'requests') { ensureRequests(); ensurePromises(); }
     if (view === 'promises') { renderPromises(); ensurePromises(); }
     if (view === 'checks' && state.result) renderChecks();
     if (view === 'customer' && state.result) { renderCustomer(); ensurePromises(); }
@@ -1545,7 +1546,7 @@
     }
     $('promiseRows').innerHTML = list.map((p) => `
       <tr tabindex="0" data-promise-edit="${esc(p.id)}">
-        <td>${esc(p.id)}<span class="sub">${esc(p.createdAt || '')}</span></td>
+        <td>${esc(p.id)}<span class="sub">${esc(p.createdAt || '')}</span>${p.requestId ? `<span class="sub">الطلب ${esc(p.requestId)}</span>` : ''}</td>
         <td><button type="button" class="link-btn" data-account="${esc(p.account)}">${esc(p.customer)}</button><span class="sub">${esc(p.account)} · ${esc(p.warehouse || 'بلا مخزن')}</span></td>
         <td class="n">${money(p.amount)}</td>
         <td class="date">${esc(p.due || '—')}</td>
@@ -1554,6 +1555,19 @@
         <td>${esc(p.owner || '—')}</td>
         <td>${p.note ? esc(p.note) : '<span class="sub">—</span>'}</td>
       </tr>`).join('');
+  }
+
+  /**
+   * fillPromiseRequestList - the customer's requests, offered as a label for the
+   * promise. The link is only a reference for the reader: it has no effect on
+   * the promise's amount or status, nor on the request's figures.
+   */
+  function fillPromiseRequestList(account) {
+    const code = String(account || '').trim().toLowerCase();
+    const list = code
+      ? state.requests.filter((r) => String(r.account).trim().toLowerCase() === code)
+      : [];
+    $('promiseRequestList').innerHTML = list.map((r) => `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.customer)} · ${money(r.amount)}</option>`).join('');
   }
 
   function openPromise(account, id) {
@@ -1571,6 +1585,9 @@
     $('promiseDue').value = p ? p.due : todayStr();
     $('promiseStatus').value = p ? p.status : 'قائم';
     $('promiseNote').value = p ? p.note : '';
+    $('promiseRequest').value = p ? (p.requestId || '') : '';
+    $('promiseRequest').readOnly = !!p;
+    fillPromiseRequestList(p ? p.account : (account || ''));
     $('promiseError').hidden = true;
     $('promiseSave').disabled = false;
     $('promiseDialog').showModal();
@@ -1589,6 +1606,7 @@
         amount: $('promiseAmount').value.trim(),
         due: $('promiseDue').value,
         status: $('promiseStatus').value,
+        requestId: $('promiseRequest').value.trim(),
         note: $('promiseNote').value,
       });
       const saved = data.promise;
@@ -1597,6 +1615,7 @@
       $('promiseDialog').close();
       renderPromises();
       if (document.body.dataset.view === 'dashboard') renderDashboard();
+      if (document.body.dataset.view === 'requests') renderRequests();
       if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
       banner(`تم حفظ وعد السداد ${saved.id}.`);
     } catch (e) {
@@ -1673,8 +1692,10 @@
     } finally {
       state.promisesLoading = false;
       if (document.body.dataset.view === 'promises') renderPromises();
+      if (document.body.dataset.view === 'requests') renderRequests();
       if (document.body.dataset.view === 'dashboard') renderDashboard();
       if (document.body.dataset.view === 'customer' && state.customerAccount) renderCustomer();
+      if (document.body.dataset.view === 'requests' && $('decision').open && state.deciding) $('decisionDetails').innerHTML = reviewDetailsHtml(state.deciding);
     }
   }
 
@@ -1746,6 +1767,13 @@
     return state.requests.filter((r) => requestMatches(r, f)).reverse();
   }
 
+  /** requestPromiseHtml - the promise ids recorded against this request, as a label. */
+  function requestPromiseHtml(requestId) {
+    const list = state.promises.filter((p) => p.requestId === requestId);
+    if (!list.length) return '';
+    return `<span class="sub">وعد ${list.map((p) => esc(p.id)).join(' · ')}</span>`;
+  }
+
   function renderRequests() {
     const list = filteredRequests();
     const pending = state.requests.filter((r) => r.status === 'قيد الاعتماد');
@@ -1780,7 +1808,7 @@
       const editDelivery = canDeliver() && deliveryApplies(r);
       return `
       <tr tabindex="0" data-review="${esc(r.id)}">
-        <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span></td>
+        <td>${esc(r.id)}<span class="sub">${esc(r.createdAt)}</span>${requestPromiseHtml(r.id)}</td>
         <td><button type="button" class="link-btn" data-account="${esc(r.account)}">${esc(r.customer)}</button><span class="sub">${esc(r.account)} · ${esc(r.rep)}</span></td>
         <td class="n">${money(r.amount)}${hasActual(r) ? `<span class="sub actual-line">${actualCell(r)}</span>` : ''}</td>
         <td class="n">${r.advancePayment !== '' && r.advancePayment != null ? money(r.advancePayment) : '<span class="sub">—</span>'}</td>
@@ -2015,6 +2043,15 @@
           </dl>
         </section>`
       : '';
+    // The linked promises are shown for the record only; nothing here is added
+    // to the order's amounts or to its checks.
+    const promises = state.promises.filter((p) => p.requestId === r.id);
+    const promiseBlock = promises.length
+      ? `<section class="review-block full">
+          <h3>وعود السداد المرتبطة</h3>
+          <dl>${promises.map((p) => `<dt>${esc(p.id)} · ${esc(p.status)}</dt><dd>${money(p.amount)} · ${esc(p.due || '—')}${p.owner ? ` · ${esc(p.owner)}` : ''}</dd>`).join('')}</dl>
+        </section>`
+      : '';
     return `
       ${notice ? `<div class="review-notice">${esc(notice)}</div>` : ''}
       <section class="review-block">
@@ -2053,6 +2090,7 @@
       </section>
       ${delivery}
       ${actual}
+      ${promiseBlock}
       <section class="review-block full">
         <h3>القرار</h3>
         ${decision}
@@ -2106,6 +2144,7 @@
     state.decisionPending = false;
     state.decisionCanAct = requestCanAct(r);
     state.decisionPreview = false;
+    ensurePromises();
     const pending = r.status === 'قيد الاعتماد';
     const status = r.status ? `<span class="tag ${STATUS_TAG[r.status] || 'paid'}">${esc(r.status)}</span>` : '';
     $('decisionTitle').textContent = `${pending && state.decisionCanAct ? 'مراجعة الطلب' : 'تفاصيل الطلب'} ${r.id}`;
@@ -2590,6 +2629,9 @@
   });
   $('promiseSave').addEventListener('click', savePromiseForm);
   $('promiseCancel').addEventListener('click', () => $('promiseDialog').close());
+  $('promiseAccount').addEventListener('input', () => {
+    if (!$('promiseAccount').readOnly) fillPromiseRequestList($('promiseAccount').value);
+  });
   $('promiseDialog').addEventListener('close', () => { state.promiseEditing = null; });
   $('requestRows').addEventListener('click', (e) => {
     const link = e.target.closest('button[data-account]');
